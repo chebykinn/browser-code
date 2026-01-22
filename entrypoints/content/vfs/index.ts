@@ -563,16 +563,26 @@ export class VirtualFS {
     }
 
     try {
-      // Execute the script via script tag injection (bypasses CSP)
-      const execResult = executeInPageContext(result.content);
+      // Execute the script via background (world: MAIN)
+      const execResult = await executeInPageContextAsync(result.content);
       return {
         success: true,
         result: execResult,
       };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      // Check if this is a CSP error
+      if (errorMsg.includes('CSP') || errorMsg.includes('Content Security Policy') || errorMsg.includes('Function()')) {
+        return {
+          success: false,
+          error: 'Script blocked by page CSP. The script is saved and will run automatically on page reload.',
+        };
+      }
+
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMsg,
       };
     }
   }
@@ -628,11 +638,9 @@ export class VirtualFS {
    * Run all saved scripts and styles on page load
    */
   async runAutoEdits(): Promise<void> {
-    console.log('[VFS] Loading saved styles for:', this.urlPath);
-    // Note: Scripts are handled by userScripts API (registered in background.js)
-    // This only injects styles since CSS injection works fine from content scripts
+    console.log('[VFS] Running auto-edits for:', this.urlPath);
 
-    // Inject all saved styles
+    // Inject all saved styles (always works, not affected by CSP)
     const styles = await this.storage.listFiles('style', this.urlPath);
     console.log('[VFS] Found styles:', styles.map(s => s.name));
 
@@ -641,6 +649,63 @@ export class VirtualFS {
       if (file) {
         this.injectStyle(style.name, file.content);
         console.log('[VFS] Injected style:', style.name);
+      }
+    }
+
+    // Check if userScripts API is available
+    // If available, scripts are registered in background and run automatically via userScripts
+    // This bypasses page CSP because userScripts run in USER_SCRIPT world with custom CSP
+    try {
+      const response = await browser.runtime.sendMessage({ type: 'HAS_USER_SCRIPTS' }) as { available: boolean };
+      if (response?.available) {
+        console.log('[VFS] userScripts API available - scripts run via background registration (CSP bypass)');
+        return;
+      }
+    } catch (error) {
+      console.log('[VFS] Could not check userScripts availability:', error);
+    }
+
+    // No userScripts API - try manual injection (will fail on strict CSP pages)
+    console.log('[VFS] No userScripts API, attempting manual script injection');
+    const scripts = await this.storage.listFiles('script', this.urlPath);
+    console.log('[VFS] Found scripts:', scripts.map(s => s.name));
+
+    for (const script of scripts) {
+      const file = await this.storage.readFile('script', script.name, this.urlPath);
+      if (file) {
+        console.log('[VFS] Executing script:', script.name);
+        await this.injectScript(file.content);
+      }
+    }
+  }
+
+  /**
+   * Inject a script into the page (runs in MAIN world via background script)
+   * Note: May fail on pages with strict CSP. For auto-run scripts, use userScripts API instead.
+   */
+  private async injectScript(content: string): Promise<void> {
+    try {
+      // Try background script execution
+      await executeInPageContextAsync(content);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      // Check if this is a CSP error
+      if (errorMsg.includes('CSP') || errorMsg.includes('Content Security Policy') || errorMsg.includes('Function()')) {
+        console.warn('[VFS] Script blocked by page CSP. If userScripts API is available, the script will run on page reload.');
+        // Don't try fallback - it will also fail on CSP pages
+        return;
+      }
+
+      console.error('[VFS] Script injection via background failed:', error);
+      // Fallback to direct injection for non-CSP errors
+      try {
+        const script = document.createElement('script');
+        script.textContent = content;
+        document.documentElement.appendChild(script);
+        script.remove();
+      } catch (fallbackError) {
+        console.error('[VFS] Direct script injection also failed:', fallbackError);
       }
     }
   }

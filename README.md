@@ -55,7 +55,7 @@ bun run build
 - The sidebar panel opens on the right side of the browser
 
 **Firefox:**
-- Click the Browser Code extension icon in your toolbar, or press `Ctrl+B` / `Cmd+B`
+- Click the Browser Code extension icon in your toolbar
 - The sidebar panel opens on the left side of the browser
 
 ### The Virtual Filesystem

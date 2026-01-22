@@ -453,6 +453,12 @@ async function handleMessage(
       }
     }
 
+    case 'HAS_USER_SCRIPTS': {
+      // Check if userScripts API is available
+      const available = getUserScriptsAPI() !== undefined;
+      return { available };
+    }
+
     case 'EXECUTE_IN_MAIN_WORLD': {
       try {
         const { code } = message;
@@ -626,21 +632,41 @@ function sendToSidebar(
   }
 }
 
-// Declare chrome global for userScripts API (not in browser polyfill)
+// UserScripts API interface (works for both Chrome and Firefox MV3)
+interface UserScriptsAPI {
+  configureWorld: (config: { csp?: string; messaging?: boolean }) => Promise<void>;
+  getScripts: () => Promise<Array<{ id: string }>>;
+  register: (scripts: Array<{
+    id: string;
+    matches: string[];
+    js: Array<{ code: string }>;
+    runAt: string;
+    world: string;
+  }>) => Promise<void>;
+  unregister: (filter: { ids: string[] }) => Promise<void>;
+}
+
+// Declare chrome global for userScripts API (Chrome)
 declare const chrome: {
-  userScripts?: {
-    configureWorld: (config: { csp: string; messaging: boolean }) => Promise<void>;
-    getScripts: () => Promise<Array<{ id: string }>>;
-    register: (scripts: Array<{
-      id: string;
-      matches: string[];
-      js: Array<{ code: string }>;
-      runAt: string;
-      world: string;
-    }>) => Promise<void>;
-    unregister: (filter: { ids: string[] }) => Promise<void>;
-  };
+  userScripts?: UserScriptsAPI;
 };
+
+/**
+ * Get userScripts API (works for both Chrome and Firefox MV3)
+ * Chrome uses chrome.userScripts, Firefox MV3 uses browser.userScripts
+ */
+function getUserScriptsAPI(): UserScriptsAPI | undefined {
+  if (typeof chrome !== 'undefined' && chrome.userScripts) {
+    return chrome.userScripts;
+  }
+  // Firefox MV3 uses browser.userScripts
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof browser !== 'undefined' && (browser as any).userScripts) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (browser as any).userScripts;
+  }
+  return undefined;
+}
 
 /**
  * Initialize the userScripts API for executing user scripts.
@@ -648,11 +674,25 @@ declare const chrome: {
  */
 async function initUserScripts(): Promise<void> {
   console.log('[Page Editor] initUserScripts called');
-  console.log('[Page Editor] chrome object:', typeof chrome, chrome ? Object.keys(chrome) : 'undefined');
 
-  // userScripts API is Chrome-only and not in browser polyfill
-  if (!chrome?.userScripts) {
-    console.log('[Page Editor] userScripts API not available (Chrome 120+ required with Developer Mode enabled)');
+  // Firefox MV3: userScripts is an optional permission that must be requested
+  // Check if we have the permission, request it if not
+  try {
+    const hasPermission = await browser.permissions.contains({ permissions: ['userScripts'] });
+    if (!hasPermission) {
+      console.log('[Page Editor] userScripts permission not granted, requesting...');
+      // Note: This will only work if triggered by user action
+      // For now, just log that we need the permission
+      console.log('[Page Editor] userScripts permission needs to be granted via extension settings');
+    }
+  } catch (e) {
+    // Chrome doesn't need this check - permission is install-time
+    console.log('[Page Editor] Permission check skipped (likely Chrome)');
+  }
+
+  const userScriptsApi = getUserScriptsAPI();
+  if (!userScriptsApi) {
+    console.log('[Page Editor] userScripts API not available (Chrome 120+ or Firefox 128+ required, or permission not granted)');
     return;
   }
 
@@ -660,7 +700,7 @@ async function initUserScripts(): Promise<void> {
 
   try {
     // Configure the USER_SCRIPT world with permissive CSP
-    await chrome.userScripts!.configureWorld({
+    await userScriptsApi.configureWorld({
       csp: "script-src 'self' 'unsafe-inline' 'unsafe-eval'; object-src 'self';",
       messaging: false,
     });
@@ -690,17 +730,18 @@ async function initUserScripts(): Promise<void> {
 async function syncUserScripts(): Promise<void> {
   console.log('[Page Editor] syncUserScripts called');
 
-  if (!chrome?.userScripts) {
+  const userScriptsApi = getUserScriptsAPI();
+  if (!userScriptsApi) {
     console.log('[Page Editor] syncUserScripts: no userScripts API');
     return;
   }
 
   try {
     // Get all registered scripts and unregister them
-    const existingScripts = await chrome.userScripts.getScripts();
+    const existingScripts = await userScriptsApi.getScripts();
     console.log('[Page Editor] Existing userScripts:', existingScripts.length);
     if (existingScripts.length > 0) {
-      await chrome.userScripts.unregister({ ids: existingScripts.map(s => s.id) });
+      await userScriptsApi.unregister({ ids: existingScripts.map(s => s.id) });
       console.log('[Page Editor] Unregistered existing scripts');
     }
 
@@ -748,7 +789,7 @@ async function syncUserScripts(): Promise<void> {
 
     if (scriptsToRegister.length > 0) {
       console.log('[Page Editor] Registering scripts:', scriptsToRegister.map(s => ({ id: s.id, matches: s.matches })));
-      await chrome.userScripts!.register(scriptsToRegister);
+      await userScriptsApi.register(scriptsToRegister);
       console.log('[Page Editor] Registered', scriptsToRegister.length, 'userScripts successfully');
     } else {
       console.log('[Page Editor] No scripts to register');

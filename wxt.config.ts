@@ -10,8 +10,14 @@ export default defineConfig({
       'storage',
       'activeTab',
       'scripting',
+      // Chrome: userScripts is install-time permission
+      // Firefox: userScripts must be in optional_permissions
       ...(browser === 'chrome' ? ['sidePanel', 'userScripts'] : []),
     ],
+    // Firefox MV3: userScripts must be optional and requested at runtime
+    ...(browser === 'firefox' && {
+      optional_permissions: ['userScripts'],
+    }),
     host_permissions: ['<all_urls>'],
     // Firefox: use sidebar_action for sidebar panel
     ...(browser === 'firefox' && {
@@ -22,11 +28,9 @@ export default defineConfig({
       browser_specific_settings: {
         gecko: {
           id: 'browser-code@extension',
-          strict_min_version: '109.0',
+          strict_min_version: '128.0',
         },
       },
-      // Firefox MV2 allows unsafe-eval
-      content_security_policy: "script-src 'self' 'unsafe-eval'; object-src 'self'",
     }),
   }),
 });
