@@ -22,22 +22,29 @@ The agent can:
 
 ## Installation
 
-### Chrome
+Build the extension:
+```bash
+bun install
+```
 
-1. Download/build the extension (`.output/chrome-mv3/` folder)
-2. Go to `chrome://extensions`
-3. Enable **Developer mode** (top right toggle)
-4. Click **Load unpacked** and select the `.output/chrome-mv3/` folder
-5. Find "Browser Code" in the list and click **Details**
-6. Scroll down and enable **Allow access to file URLs** (optional)
-7. **Important:** Toggle ON the **User scripts** permission - this is required for scripts to run on sites with strict Content Security Policy (like LinkedIn)
+```
+bun run build
+```
+
+### Chrome
+ 
+1. Go to `chrome://extensions`
+2. Enable **Developer mode** (top right toggle)
+3. Click **Load unpacked** and select the `.output/chrome-mv3/` folder
+4. Find "Browser Code" in the list and click **Details**
+5. Scroll down and enable **Allow access to file URLs** (optional)
+6. **Important:** Toggle ON the **User scripts** permission - this is required for scripts to run on sites with strict Content Security Policy (like LinkedIn)
 
 ### Firefox
 
-1. Download/build the extension (`.output/firefox-mv2/` folder)
-2. Go to `about:debugging#/runtime/this-firefox`
-3. Click **Load Temporary Add-on**
-4. Select any file inside the `.output/firefox-mv2/` folder (e.g., `manifest.json`)
+1. Go to `about:debugging#/runtime/this-firefox`
+2. Click **Load Temporary Add-on**
+3. Select any file inside the `.output/firefox-mv2/` folder (e.g., `manifest.json`)
 
 ## Usage
 
