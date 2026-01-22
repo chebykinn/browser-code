@@ -13,7 +13,18 @@
  * }
  */
 
-import type { StoredFile, DomainStorage, EditRecord, VFSError, FileType } from './types';
+import type { StoredFile, DomainStorage, EditRecord, VFSError, FileType, FileListResult, FileReadResult } from './types';
+import { findMatchingRoutes, type RouteMatch } from './route-matcher';
+
+export interface StoredScreenshot {
+  dataUrl: string;
+  version: number;
+  timestamp: number;
+  format: 'png' | 'jpeg';
+}
+
+// In-memory screenshot storage (per URL path, not persisted)
+const screenshotCache = new Map<string, StoredScreenshot>();
 
 export class VFSStorage {
   private domain: string;
@@ -84,22 +95,54 @@ export class VFSStorage {
   }
 
   /**
-   * Read a file from storage
+   * Read a file from storage with dynamic route matching support.
+   * First tries exact match, then falls back to pattern matching.
    */
   async readFile(
     type: FileType,
     name: string,
     urlPath?: string
-  ): Promise<StoredFile | null> {
+  ): Promise<FileReadResult> {
     const data = await this.load();
-    const path = urlPath || this.defaultUrlPath;
+    const targetPath = urlPath || this.defaultUrlPath;
 
-    if (!data.paths[path]) {
-      return null;
+    // First try exact match
+    if (data.paths[targetPath]) {
+      const collection = type === 'script' ? data.paths[targetPath].scripts : data.paths[targetPath].styles;
+      return {
+        file: collection[name] || null,
+        matchedPattern: null,
+        params: {},
+      };
     }
 
-    const collection = type === 'script' ? data.paths[path].scripts : data.paths[path].styles;
-    return collection[name] || null;
+    // Try dynamic route matching
+    const matches = await this.findMatchingPaths(targetPath);
+
+    if (matches.length > 0) {
+      const bestMatch = matches[0];
+      const pathData = data.paths[bestMatch.pattern];
+      const collection = type === 'script' ? pathData.scripts : pathData.styles;
+      return {
+        file: collection[name] || null,
+        matchedPattern: bestMatch.pattern,
+        params: bestMatch.params,
+      };
+    }
+
+    return { file: null, matchedPattern: null, params: {} };
+  }
+
+  /**
+   * Read a file from storage (simple version for backwards compatibility)
+   */
+  async readFileSimple(
+    type: FileType,
+    name: string,
+    urlPath?: string
+  ): Promise<StoredFile | null> {
+    const result = await this.readFile(type, name, urlPath);
+    return result.file;
   }
 
   /**
@@ -173,26 +216,73 @@ export class VFSStorage {
   }
 
   /**
-   * List files in a directory
+   * Find all stored paths that match the given URL path using dynamic route matching.
+   * Returns matches sorted by priority (most specific first).
+   */
+  async findMatchingPaths(urlPath: string): Promise<RouteMatch[]> {
+    const data = await this.load();
+    const storedPaths = Object.keys(data.paths);
+    return findMatchingRoutes(urlPath, storedPaths);
+  }
+
+  /**
+   * List files in a directory with dynamic route matching support.
+   * First tries exact match, then falls back to pattern matching.
    */
   async listFiles(
     type: FileType,
     urlPath?: string
-  ): Promise<Array<{ name: string; version: number; modified: number }>> {
+  ): Promise<FileListResult> {
     const data = await this.load();
-    const path = urlPath || this.defaultUrlPath;
+    const targetPath = urlPath || this.defaultUrlPath;
 
-    if (!data.paths[path]) {
-      return [];
+    // First try exact match (backwards compatible)
+    if (data.paths[targetPath]) {
+      const collection = type === 'script' ? data.paths[targetPath].scripts : data.paths[targetPath].styles;
+
+      return {
+        files: Object.entries(collection).map(([name, file]) => ({
+          name,
+          version: file.version,
+          modified: file.modified,
+        })),
+        matchedPattern: null,
+        params: {},
+      };
     }
 
-    const collection = type === 'script' ? data.paths[path].scripts : data.paths[path].styles;
+    // Try dynamic route matching
+    const matches = await this.findMatchingPaths(targetPath);
 
-    return Object.entries(collection).map(([name, file]) => ({
-      name,
-      version: file.version,
-      modified: file.modified,
-    }));
+    if (matches.length > 0) {
+      // Use highest priority match
+      const bestMatch = matches[0];
+      const pathData = data.paths[bestMatch.pattern];
+      const collection = type === 'script' ? pathData.scripts : pathData.styles;
+
+      return {
+        files: Object.entries(collection).map(([name, file]) => ({
+          name,
+          version: file.version,
+          modified: file.modified,
+        })),
+        matchedPattern: bestMatch.pattern,
+        params: bestMatch.params,
+      };
+    }
+
+    return { files: [], matchedPattern: null, params: {} };
+  }
+
+  /**
+   * List files in a directory (simple version for backwards compatibility)
+   */
+  async listFilesSimple(
+    type: FileType,
+    urlPath?: string
+  ): Promise<Array<{ name: string; version: number; modified: number }>> {
+    const result = await this.listFiles(type, urlPath);
+    return result.files;
   }
 
   /**
@@ -257,5 +347,30 @@ export class VFSStorage {
   async getAllPaths(): Promise<string[]> {
     const data = await this.load();
     return Object.keys(data.paths);
+  }
+
+  /**
+   * Save a screenshot (in-memory only, not persisted)
+   */
+  saveScreenshot(urlPath: string, dataUrl: string, format: 'png' | 'jpeg'): StoredScreenshot {
+    const key = `${this.domain}:${urlPath}`;
+    const existing = screenshotCache.get(key);
+    const screenshot: StoredScreenshot = {
+      dataUrl,
+      version: existing ? existing.version + 1 : 1,
+      timestamp: Date.now(),
+      format,
+    };
+    screenshotCache.set(key, screenshot);
+    console.log('[VFS Storage] Screenshot saved for:', key);
+    return screenshot;
+  }
+
+  /**
+   * Get the latest screenshot (in-memory)
+   */
+  getScreenshot(urlPath: string): StoredScreenshot | null {
+    const key = `${this.domain}:${urlPath}`;
+    return screenshotCache.get(key) || null;
   }
 }

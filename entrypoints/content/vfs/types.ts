@@ -57,7 +57,7 @@ export interface DomainStorage {
   }>;
 }
 
-export type FileType = 'page' | 'script' | 'style';
+export type FileType = 'page' | 'script' | 'style' | 'console' | 'screenshot';
 
 export interface ParsedPath {
   domain: string;
@@ -65,4 +65,26 @@ export interface ParsedPath {
   fileType: FileType;
   fileName: string;
   fullPath: string;
+}
+
+/**
+ * Result of listing files with route matching support
+ */
+export interface FileListResult {
+  files: Array<{ name: string; version: number; modified: number }>;
+  /** The pattern that matched, or null if no match/exact match */
+  matchedPattern: string | null;
+  /** Extracted route parameters */
+  params: Record<string, string | string[]>;
+}
+
+/**
+ * Result of reading a file with route matching support
+ */
+export interface FileReadResult {
+  file: StoredFile | null;
+  /** The pattern that matched */
+  matchedPattern: string | null;
+  /** Extracted route parameters */
+  params: Record<string, string | string[]>;
 }

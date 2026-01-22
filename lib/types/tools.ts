@@ -40,6 +40,11 @@ export const LsInputSchema = z.object({
   path: z.string().optional().describe('Directory path (defaults to current domain root)'),
 });
 
+export const ScreenshotInputSchema = z.object({
+  format: z.enum(['png', 'jpeg']).optional().describe('Image format (default: png)'),
+  quality: z.number().min(0).max(100).optional().describe('JPEG quality 0-100 (only for jpeg format)'),
+});
+
 // Infer types from schemas
 export type ReadInput = z.infer<typeof ReadInputSchema>;
 export type EditInput = z.infer<typeof EditInputSchema>;
@@ -48,6 +53,7 @@ export type GlobInput = z.infer<typeof GlobInputSchema>;
 export type GrepInput = z.infer<typeof GrepInputSchema>;
 export type BashInput = z.infer<typeof BashInputSchema>;
 export type LsInput = z.infer<typeof LsInputSchema>;
+export type ScreenshotInput = z.infer<typeof ScreenshotInputSchema>;
 
 // Tool result types - VFS-based
 export interface ReadResult {
@@ -116,6 +122,14 @@ export interface LsResult {
   path: string;
 }
 
+export interface ScreenshotResult {
+  success: boolean;
+  path?: string;
+  version?: number;
+  format?: 'png' | 'jpeg';
+  error?: string;
+}
+
 // Union type for tool inputs
 export type ToolInput =
   | { name: 'Read'; input: ReadInput }
@@ -124,7 +138,8 @@ export type ToolInput =
   | { name: 'Glob'; input: GlobInput }
   | { name: 'Grep'; input: GrepInput }
   | { name: 'Bash'; input: BashInput }
-  | { name: 'Ls'; input: LsInput };
+  | { name: 'Ls'; input: LsInput }
+  | { name: 'Screenshot'; input: ScreenshotInput };
 
 // Union type for tool results
 export type ToolResult =
@@ -135,4 +150,5 @@ export type ToolResult =
   | GrepResult
   | GrepCountResult
   | BashResult
-  | LsResult;
+  | LsResult
+  | ScreenshotResult;

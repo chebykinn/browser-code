@@ -5,9 +5,10 @@ import { glob } from './glob';
 import { grep, grepCount } from './grep';
 import { bash } from './bash';
 import { ls } from './ls';
+import { screenshot } from './screenshot';
 import type { ToolResult } from '@/lib/types/tools';
 
-export { read, edit, write, glob, grep, grepCount, bash, ls };
+export { read, edit, write, glob, grep, grepCount, bash, ls, screenshot };
 
 /**
  * Execute a tool by name with given input
@@ -30,6 +31,8 @@ export async function executeTool(name: string, input: unknown): Promise<ToolRes
       return bash(input as Parameters<typeof bash>[0]);
     case 'Ls':
       return ls(input as Parameters<typeof ls>[0]);
+    case 'Screenshot':
+      return screenshot(input as Parameters<typeof screenshot>[0]);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

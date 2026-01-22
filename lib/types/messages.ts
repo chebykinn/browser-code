@@ -87,6 +87,8 @@ export interface CopyVfsFileMessage {
   fileType: 'script' | 'style';
   fileName: string;
   targetTabId: number;
+  /** Optional custom target path. If not provided, uses the tab's current pathname. */
+  targetPath?: string;
 }
 
 export interface DeleteVfsFileAnyMessage {
@@ -117,6 +119,7 @@ export interface DomainExportData {
 export interface PathExportData {
   scripts: Record<string, { content: string; version: number; created: number; modified: number }>;
   styles: Record<string, { content: string; version: number; created: number; modified: number }>;
+  editRecords?: Array<{ selector: string; oldContent: string; newContent: string; timestamp: number }>;
 }
 
 // Messages from background to content script
@@ -166,6 +169,18 @@ export interface ExecuteInMainWorldMessage {
   code: string;
 }
 
+// Message from content script to background to capture screenshot
+export interface CaptureScreenshotMessage {
+  type: 'CAPTURE_SCREENSHOT';
+  format?: 'png' | 'jpeg';
+  quality?: number;
+}
+
+// Message to check if userScripts API is available
+export interface HasUserScriptsMessage {
+  type: 'HAS_USER_SCRIPTS';
+}
+
 // Union types
 export type SidebarToBackgroundMessage =
   | ChatMessage
@@ -186,7 +201,9 @@ export type SidebarToBackgroundMessage =
   | GetAllVfsFilesMessage
   | CopyVfsFileMessage
   | DeleteVfsFileAnyMessage
-  | ExecuteInMainWorldMessage;
+  | ExecuteInMainWorldMessage
+  | CaptureScreenshotMessage
+  | HasUserScriptsMessage;
 
 export interface GetVfsFilesContentMessage {
   type: 'GET_VFS_FILES';

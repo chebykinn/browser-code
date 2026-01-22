@@ -22,6 +22,7 @@ import type {
 } from './types';
 import { PageSync } from './page-sync';
 import { VFSStorage } from './storage';
+import { getConsoleCollector } from '../console/collector';
 
 /**
  * Execute JavaScript in the page context via background script.
@@ -99,8 +100,8 @@ export class VirtualFS {
       normalizedPath = `/${this.domain}${this.urlPath}/${normalizedPath}`;
     }
 
-    // Parse: /{domain}/{url-path}/[page.html|scripts/name.js|styles/name.css]
-    const match = normalizedPath.match(/^\/([^\/]+)(\/[^\/]*)*\/(page\.html|scripts\/([^\/]+\.js)|styles\/([^\/]+\.css))$/);
+    // Parse: /{domain}/{url-path}/[page.html|console.log|screenshot.png|scripts/name.js|styles/name.css]
+    const match = normalizedPath.match(/^\/([^\/]+)(\/[^\/]*)*\/(page\.html|console\.log|screenshot\.png|scripts\/([^\/]+\.js)|styles\/([^\/]+\.css))$/);
 
     if (!match) {
       // Check if it's a directory path
@@ -118,7 +119,7 @@ export class VirtualFS {
     }
 
     const domain = match[1];
-    const urlPathParts = normalizedPath.replace(`/${domain}`, '').replace(/\/(page\.html|scripts\/.*|styles\/.*)$/, '');
+    const urlPathParts = normalizedPath.replace(`/${domain}`, '').replace(/\/(page\.html|console\.log|screenshot\.png|scripts\/.*|styles\/.*)$/, '');
     const urlPath = urlPathParts || '/';
 
     let fileType: FileType = 'page';
@@ -127,6 +128,12 @@ export class VirtualFS {
     if (match[3] === 'page.html') {
       fileType = 'page';
       fileName = 'page.html';
+    } else if (match[3] === 'console.log') {
+      fileType = 'console';
+      fileName = 'console.log';
+    } else if (match[3] === 'screenshot.png') {
+      fileType = 'screenshot';
+      fileName = 'screenshot.png';
     } else if (match[4]) {
       fileType = 'script';
       fileName = match[4];
@@ -189,9 +196,48 @@ export class VirtualFS {
       return this.pageSync.read(offset, limit);
     }
 
+    if (parsed.fileType === 'console') {
+      const collector = getConsoleCollector();
+      const content = collector.getLogsAsText();
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+
+      let resultContent = content;
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset || 0;
+        const end = limit ? start + limit : undefined;
+        resultContent = lines.slice(start, end).join('\n');
+      }
+
+      return {
+        content: resultContent,
+        version: collector.getCount(), // Version is the log count
+        lines: totalLines,
+        path: parsed.fullPath,
+      };
+    }
+
+    if (parsed.fileType === 'screenshot') {
+      // Screenshot is stored in memory, fetch from storage
+      const screenshot = await this.storage.getScreenshot(parsed.urlPath);
+      if (!screenshot) {
+        return {
+          code: 'NOT_FOUND',
+          message: 'No screenshot available. Use the Screenshot tool to capture one first.',
+          path,
+        };
+      }
+      return {
+        content: screenshot.dataUrl,
+        version: screenshot.version,
+        lines: 1,
+        path: parsed.fullPath,
+      };
+    }
+
     // Read from storage
-    const file = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
-    if (!file) {
+    const readResult = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
+    if (!readResult.file) {
       return {
         code: 'NOT_FOUND',
         message: `File not found: ${path}`,
@@ -199,7 +245,7 @@ export class VirtualFS {
       };
     }
 
-    let content = file.content;
+    let content = readResult.file.content;
     const lines = content.split('\n');
     const totalLines = lines.length;
 
@@ -212,7 +258,7 @@ export class VirtualFS {
 
     return {
       content,
-      version: file.version,
+      version: readResult.file.version,
       lines: totalLines,
       path: parsed.fullPath,
     };
@@ -300,8 +346,8 @@ export class VirtualFS {
     }
 
     // Read current content
-    const file = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
-    if (!file) {
+    const readResult = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
+    if (!readResult.file) {
       return {
         code: 'NOT_FOUND',
         message: `File not found: ${path}`,
@@ -310,18 +356,18 @@ export class VirtualFS {
     }
 
     // Check version
-    if (file.version !== expectedVersion) {
+    if (readResult.file.version !== expectedVersion) {
       return {
         code: 'VERSION_MISMATCH',
-        message: `File changed since last read (v${expectedVersion} → v${file.version}). Re-read required.`,
+        message: `File changed since last read (v${expectedVersion} → v${readResult.file.version}). Re-read required.`,
         path,
         expectedVersion,
-        actualVersion: file.version,
+        actualVersion: readResult.file.version,
       };
     }
 
     // Check if oldString exists
-    if (!file.content.includes(oldString)) {
+    if (!readResult.file.content.includes(oldString)) {
       return {
         code: 'NOT_FOUND',
         message: `String not found in file: "${oldString.slice(0, 50)}..."`,
@@ -334,11 +380,11 @@ export class VirtualFS {
     let replacements = 0;
 
     if (replaceAll) {
-      const parts = file.content.split(oldString);
+      const parts = readResult.file.content.split(oldString);
       replacements = parts.length - 1;
       newContent = parts.join(newString);
     } else {
-      newContent = file.content.replace(oldString, newString);
+      newContent = readResult.file.content.replace(oldString, newString);
       replacements = 1;
     }
 
@@ -388,6 +434,26 @@ export class VirtualFS {
       version: this.pageSync.getVersion(),
     });
 
+    // Always show console.log
+    const collector = getConsoleCollector();
+    entries.push({
+      name: 'console.log',
+      path: `${targetPath}/console.log`,
+      type: 'file',
+      version: collector.getCount(),
+    });
+
+    // Show screenshot.png if it exists
+    const screenshot = await this.storage.getScreenshot(this.urlPath);
+    if (screenshot) {
+      entries.push({
+        name: 'screenshot.png',
+        path: `${targetPath}/screenshot.png`,
+        type: 'file',
+        version: screenshot.version,
+      });
+    }
+
     // Show scripts directory
     entries.push({
       name: 'scripts',
@@ -406,8 +472,8 @@ export class VirtualFS {
     if (targetPath.endsWith('/scripts')) {
       // Strip /scripts suffix to get the base URL path where files are stored
       const baseUrlPath = parsed.urlPath.replace(/\/scripts$/, '') || '/';
-      const scripts = await this.storage.listFiles('script', baseUrlPath);
-      for (const script of scripts) {
+      const scriptResult = await this.storage.listFiles('script', baseUrlPath);
+      for (const script of scriptResult.files) {
         entries.push({
           name: script.name,
           path: `${targetPath}/${script.name}`,
@@ -419,8 +485,8 @@ export class VirtualFS {
     } else if (targetPath.endsWith('/styles')) {
       // Strip /styles suffix to get the base URL path where files are stored
       const baseUrlPath = parsed.urlPath.replace(/\/styles$/, '') || '/';
-      const styles = await this.storage.listFiles('style', baseUrlPath);
-      for (const style of styles) {
+      const styleResult = await this.storage.listFiles('style', baseUrlPath);
+      for (const style of styleResult.files) {
         entries.push({
           name: style.name,
           path: `${targetPath}/${style.name}`,
@@ -455,8 +521,8 @@ export class VirtualFS {
     }
 
     // Check scripts
-    const scripts = await this.storage.listFiles('script', this.urlPath);
-    for (const script of scripts) {
+    const scriptResult = await this.storage.listFiles('script', this.urlPath);
+    for (const script of scriptResult.files) {
       const scriptPath = `${cwd}/scripts/${script.name}`;
       if (regex.test(scriptPath)) {
         matches.push(scriptPath);
@@ -464,8 +530,8 @@ export class VirtualFS {
     }
 
     // Check styles
-    const styles = await this.storage.listFiles('style', this.urlPath);
-    for (const style of styles) {
+    const styleResult = await this.storage.listFiles('style', this.urlPath);
+    for (const style of styleResult.files) {
       const stylePath = `${cwd}/styles/${style.name}`;
       if (regex.test(stylePath)) {
         matches.push(stylePath);
@@ -499,11 +565,11 @@ export class VirtualFS {
       } else {
         // Search all files in directory
         if (path.endsWith('/scripts')) {
-          const scripts = await this.storage.listFiles('script', this.urlPath);
-          scripts.forEach(s => filesToSearch.push(`${cwd}/scripts/${s.name}`));
+          const scriptResult = await this.storage.listFiles('script', this.urlPath);
+          scriptResult.files.forEach(s => filesToSearch.push(`${cwd}/scripts/${s.name}`));
         } else if (path.endsWith('/styles')) {
-          const styles = await this.storage.listFiles('style', this.urlPath);
-          styles.forEach(s => filesToSearch.push(`${cwd}/styles/${s.name}`));
+          const styleResult = await this.storage.listFiles('style', this.urlPath);
+          styleResult.files.forEach(s => filesToSearch.push(`${cwd}/styles/${s.name}`));
         } else {
           filesToSearch.push(`${cwd}/page.html`);
         }
@@ -640,14 +706,26 @@ export class VirtualFS {
   async runAutoEdits(): Promise<void> {
     console.log('[VFS] Running auto-edits for:', this.urlPath);
 
-    // Inject all saved styles (always works, not affected by CSP)
-    const styles = await this.storage.listFiles('style', this.urlPath);
-    console.log('[VFS] Found styles:', styles.map(s => s.name));
+    // Get matching files with params (supports dynamic routes like [slug])
+    const styleResult = await this.storage.listFiles('style', this.urlPath);
+    const scriptResult = await this.storage.listFiles('script', this.urlPath);
 
-    for (const style of styles) {
-      const file = await this.storage.readFile('style', style.name, this.urlPath);
-      if (file) {
-        this.injectStyle(style.name, file.content);
+    console.log('[VFS] Found styles:', styleResult.files.map(s => s.name));
+    if (styleResult.matchedPattern) {
+      console.log('[VFS] Matched style pattern:', styleResult.matchedPattern, 'params:', styleResult.params);
+    }
+
+    // Inject route params into window before scripts/styles run
+    const allParams = { ...styleResult.params, ...scriptResult.params };
+    if (Object.keys(allParams).length > 0) {
+      await this.injectRouteParams(allParams);
+    }
+
+    // Inject all saved styles (always works, not affected by CSP)
+    for (const style of styleResult.files) {
+      const readResult = await this.storage.readFile('style', style.name, this.urlPath);
+      if (readResult.file) {
+        this.injectStyle(style.name, readResult.file.content);
         console.log('[VFS] Injected style:', style.name);
       }
     }
@@ -667,15 +745,31 @@ export class VirtualFS {
 
     // No userScripts API - try manual injection (will fail on strict CSP pages)
     console.log('[VFS] No userScripts API, attempting manual script injection');
-    const scripts = await this.storage.listFiles('script', this.urlPath);
-    console.log('[VFS] Found scripts:', scripts.map(s => s.name));
+    console.log('[VFS] Found scripts:', scriptResult.files.map(s => s.name));
+    if (scriptResult.matchedPattern) {
+      console.log('[VFS] Matched script pattern:', scriptResult.matchedPattern, 'params:', scriptResult.params);
+    }
 
-    for (const script of scripts) {
-      const file = await this.storage.readFile('script', script.name, this.urlPath);
-      if (file) {
+    for (const script of scriptResult.files) {
+      const readResult = await this.storage.readFile('script', script.name, this.urlPath);
+      if (readResult.file) {
         console.log('[VFS] Executing script:', script.name);
-        await this.injectScript(file.content);
+        await this.injectScript(readResult.file.content);
       }
+    }
+  }
+
+  /**
+   * Inject route params into the page context as window.__routeParams
+   */
+  private async injectRouteParams(params: Record<string, string | string[]>): Promise<void> {
+    const code = `window.__routeParams = ${JSON.stringify(params)};`;
+
+    try {
+      await executeInPageContextAsync(code);
+      console.log('[VFS] Injected route params:', params);
+    } catch (error) {
+      console.error('[VFS] Failed to inject route params:', error);
     }
   }
 
@@ -713,15 +807,29 @@ export class VirtualFS {
   /**
    * List all scripts for current URL path
    */
-  async listScripts(): Promise<Array<{ name: string; version: number; modified: number }>> {
-    return this.storage.listFiles('script', this.urlPath);
+  async listScripts(): Promise<{
+    files: Array<{ name: string; version: number; modified: number }>;
+    matchedPattern: string | null;
+  }> {
+    const result = await this.storage.listFiles('script', this.urlPath);
+    return {
+      files: result.files,
+      matchedPattern: result.matchedPattern,
+    };
   }
 
   /**
    * List all styles for current URL path
    */
-  async listStyles(): Promise<Array<{ name: string; version: number; modified: number }>> {
-    return this.storage.listFiles('style', this.urlPath);
+  async listStyles(): Promise<{
+    files: Array<{ name: string; version: number; modified: number }>;
+    matchedPattern: string | null;
+  }> {
+    const result = await this.storage.listFiles('style', this.urlPath);
+    return {
+      files: result.files,
+      matchedPattern: result.matchedPattern,
+    };
   }
 
   /**

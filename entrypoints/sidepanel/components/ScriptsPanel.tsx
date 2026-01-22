@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import type { VfsExportData } from '@/lib/types/messages';
+import { CopyDialog, type CopyTarget } from './CopyDialog';
 
 interface VfsFile {
   name: string;
@@ -35,10 +36,15 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
   const [allFiles, setAllFiles] = useState<AllFilesData>({});
   const [currentDomain, setCurrentDomain] = useState<string>('');
   const [currentPath, setCurrentPath] = useState<string>('');
+  const [scriptsMatchedPattern, setScriptsMatchedPattern] = useState<string | null>(null);
+  const [stylesMatchedPattern, setStylesMatchedPattern] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Track which file has copy dialog open: "domain|urlPath|type|name"
+  const [copyDialogFile, setCopyDialogFile] = useState<string | null>(null);
 
   const loadFiles = async () => {
     if (!tabId) {
@@ -59,6 +65,8 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
       } else {
         setCurrentScripts(response.scripts || []);
         setCurrentStyles(response.styles || []);
+        setScriptsMatchedPattern(response.scriptsMatchedPattern || null);
+        setStylesMatchedPattern(response.stylesMatchedPattern || null);
         setError(null);
       }
 
@@ -109,7 +117,8 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
     sourceDomain: string,
     sourceUrlPath: string,
     fileType: 'script' | 'style',
-    fileName: string
+    fileName: string,
+    target: CopyTarget
   ) => {
     if (!tabId) return;
 
@@ -121,6 +130,7 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
         fileType,
         fileName,
         targetTabId: tabId,
+        targetPath: target.path,
       });
 
       if (!response.success) {
@@ -128,11 +138,24 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
         return;
       }
 
-      alert(`Copied ${fileName} to current page`);
+      const pathDesc = target.type === 'exact' ? 'current page' :
+                       target.type === 'pattern' ? `pattern ${target.path}` :
+                       target.type === 'catchAll' ? `${target.path} (and below)` :
+                       target.path;
+      alert(`Copied ${fileName} to ${pathDesc}`);
+      setCopyDialogFile(null);
       await loadFiles();
     } catch (e) {
       alert('Copy failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
     }
+  };
+
+  const openCopyDialog = (domain: string, urlPath: string, fileType: 'script' | 'style', fileName: string) => {
+    setCopyDialogFile(`${domain}|${urlPath}|${fileType}|${fileName}`);
+  };
+
+  const closeCopyDialog = () => {
+    setCopyDialogFile(null);
   };
 
   const handleDeleteAny = async (
@@ -286,6 +309,11 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
             <div className="file-section current-page-section">
               <h3>Current Page</h3>
               <p className="current-page-info">{currentDomain}{currentPath}</p>
+              {(scriptsMatchedPattern || stylesMatchedPattern) && (
+                <p className="matched-pattern-info">
+                  Matched from: <code>{scriptsMatchedPattern || stylesMatchedPattern}</code>
+                </p>
+              )}
 
               {currentScripts.length === 0 && currentStyles.length === 0 ? (
                 <p className="empty-text small">No saved files for this page</p>
@@ -295,24 +323,43 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                     <div className="file-group">
                       <h4>Scripts ({currentScripts.length})</h4>
                       <ul className="files-list">
-                        {currentScripts.map((file) => (
-                          <li key={file.name} className="file-item">
-                            <div className="file-info">
-                              <strong className="file-name">{file.name}</strong>
-                              <span className="file-meta">
-                                v{file.version} • {formatDate(file.modified)}
-                              </span>
-                            </div>
-                            <div className="file-actions">
-                              <button
-                                className="file-button delete"
-                                onClick={() => handleDelete('script', file.name)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </li>
-                        ))}
+                        {currentScripts.map((file) => {
+                          const fileKey = `${currentDomain}|${currentPath}|script|${file.name}`;
+                          const showDialog = copyDialogFile === fileKey;
+                          return (
+                            <li key={file.name} className="file-item">
+                              <div className="file-info">
+                                <strong className="file-name">{file.name}</strong>
+                                <span className="file-meta">
+                                  v{file.version} • {formatDate(file.modified)}
+                                </span>
+                              </div>
+                              <div className="file-actions">
+                                <div className="copy-button-wrapper">
+                                  <button
+                                    className="file-button copy"
+                                    onClick={() => openCopyDialog(currentDomain, currentPath, 'script', file.name)}
+                                  >
+                                    Copy to...
+                                  </button>
+                                  {showDialog && (
+                                    <CopyDialog
+                                      currentPath={currentPath}
+                                      onCopy={(target) => handleCopy(currentDomain, currentPath, 'script', file.name, target)}
+                                      onCancel={closeCopyDialog}
+                                    />
+                                  )}
+                                </div>
+                                <button
+                                  className="file-button delete"
+                                  onClick={() => handleDelete('script', file.name)}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   )}
@@ -321,24 +368,43 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                     <div className="file-group">
                       <h4>Styles ({currentStyles.length})</h4>
                       <ul className="files-list">
-                        {currentStyles.map((file) => (
-                          <li key={file.name} className="file-item">
-                            <div className="file-info">
-                              <strong className="file-name">{file.name}</strong>
-                              <span className="file-meta">
-                                v{file.version} • {formatDate(file.modified)}
-                              </span>
-                            </div>
-                            <div className="file-actions">
-                              <button
-                                className="file-button delete"
-                                onClick={() => handleDelete('style', file.name)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </li>
-                        ))}
+                        {currentStyles.map((file) => {
+                          const fileKey = `${currentDomain}|${currentPath}|style|${file.name}`;
+                          const showDialog = copyDialogFile === fileKey;
+                          return (
+                            <li key={file.name} className="file-item">
+                              <div className="file-info">
+                                <strong className="file-name">{file.name}</strong>
+                                <span className="file-meta">
+                                  v{file.version} • {formatDate(file.modified)}
+                                </span>
+                              </div>
+                              <div className="file-actions">
+                                <div className="copy-button-wrapper">
+                                  <button
+                                    className="file-button copy"
+                                    onClick={() => openCopyDialog(currentDomain, currentPath, 'style', file.name)}
+                                  >
+                                    Copy to...
+                                  </button>
+                                  {showDialog && (
+                                    <CopyDialog
+                                      currentPath={currentPath}
+                                      onCopy={(target) => handleCopy(currentDomain, currentPath, 'style', file.name, target)}
+                                      onCancel={closeCopyDialog}
+                                    />
+                                  )}
+                                </div>
+                                <button
+                                  className="file-button delete"
+                                  onClick={() => handleDelete('style', file.name)}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   )}
@@ -379,30 +445,43 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                 <div className="file-group">
                                   <h4>Scripts</h4>
                                   <ul className="files-list">
-                                    {files.scripts.map((file) => (
-                                      <li key={file.name} className="file-item">
-                                        <div className="file-info">
-                                          <strong className="file-name">{file.name}</strong>
-                                          <span className="file-meta">
-                                            v{file.version} • {formatDate(file.modified)}
-                                          </span>
-                                        </div>
-                                        <div className="file-actions">
-                                          <button
-                                            className="file-button copy"
-                                            onClick={() => handleCopy(domain, urlPath, 'script', file.name)}
-                                          >
-                                            Copy
-                                          </button>
-                                          <button
-                                            className="file-button delete"
-                                            onClick={() => handleDeleteAny(domain, urlPath, 'script', file.name)}
-                                          >
-                                            Delete
-                                          </button>
-                                        </div>
-                                      </li>
-                                    ))}
+                                    {files.scripts.map((file) => {
+                                      const fileKey = `${domain}|${urlPath}|script|${file.name}`;
+                                      const showDialog = copyDialogFile === fileKey;
+                                      return (
+                                        <li key={file.name} className="file-item">
+                                          <div className="file-info">
+                                            <strong className="file-name">{file.name}</strong>
+                                            <span className="file-meta">
+                                              v{file.version} • {formatDate(file.modified)}
+                                            </span>
+                                          </div>
+                                          <div className="file-actions">
+                                            <div className="copy-button-wrapper">
+                                              <button
+                                                className="file-button copy"
+                                                onClick={() => openCopyDialog(domain, urlPath, 'script', file.name)}
+                                              >
+                                                Copy
+                                              </button>
+                                              {showDialog && (
+                                                <CopyDialog
+                                                  currentPath={currentPath}
+                                                  onCopy={(target) => handleCopy(domain, urlPath, 'script', file.name, target)}
+                                                  onCancel={closeCopyDialog}
+                                                />
+                                              )}
+                                            </div>
+                                            <button
+                                              className="file-button delete"
+                                              onClick={() => handleDeleteAny(domain, urlPath, 'script', file.name)}
+                                            >
+                                              Delete
+                                            </button>
+                                          </div>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 </div>
                               )}
@@ -411,30 +490,43 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                 <div className="file-group">
                                   <h4>Styles</h4>
                                   <ul className="files-list">
-                                    {files.styles.map((file) => (
-                                      <li key={file.name} className="file-item">
-                                        <div className="file-info">
-                                          <strong className="file-name">{file.name}</strong>
-                                          <span className="file-meta">
-                                            v{file.version} • {formatDate(file.modified)}
-                                          </span>
-                                        </div>
-                                        <div className="file-actions">
-                                          <button
-                                            className="file-button copy"
-                                            onClick={() => handleCopy(domain, urlPath, 'style', file.name)}
-                                          >
-                                            Copy
-                                          </button>
-                                          <button
-                                            className="file-button delete"
-                                            onClick={() => handleDeleteAny(domain, urlPath, 'style', file.name)}
-                                          >
-                                            Delete
-                                          </button>
-                                        </div>
-                                      </li>
-                                    ))}
+                                    {files.styles.map((file) => {
+                                      const fileKey = `${domain}|${urlPath}|style|${file.name}`;
+                                      const showDialog = copyDialogFile === fileKey;
+                                      return (
+                                        <li key={file.name} className="file-item">
+                                          <div className="file-info">
+                                            <strong className="file-name">{file.name}</strong>
+                                            <span className="file-meta">
+                                              v{file.version} • {formatDate(file.modified)}
+                                            </span>
+                                          </div>
+                                          <div className="file-actions">
+                                            <div className="copy-button-wrapper">
+                                              <button
+                                                className="file-button copy"
+                                                onClick={() => openCopyDialog(domain, urlPath, 'style', file.name)}
+                                              >
+                                                Copy
+                                              </button>
+                                              {showDialog && (
+                                                <CopyDialog
+                                                  currentPath={currentPath}
+                                                  onCopy={(target) => handleCopy(domain, urlPath, 'style', file.name, target)}
+                                                  onCancel={closeCopyDialog}
+                                                />
+                                              )}
+                                            </div>
+                                            <button
+                                              className="file-button delete"
+                                              onClick={() => handleDeleteAny(domain, urlPath, 'style', file.name)}
+                                            >
+                                              Delete
+                                            </button>
+                                          </div>
+                                        </li>
+                                      );
+                                    })}
                                   </ul>
                                 </div>
                               )}

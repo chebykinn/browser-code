@@ -669,8 +669,21 @@ body {
   font-size: 11px;
   color: #888;
   font-family: 'SF Mono', Monaco, monospace;
-  margin-bottom: 12px;
+  margin-bottom: 4px;
   word-break: break-all;
+}
+
+.matched-pattern-info {
+  font-size: 11px;
+  color: #6b9fff;
+  margin-bottom: 12px;
+}
+
+.matched-pattern-info code {
+  background: #1e3a5f;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'SF Mono', Monaco, monospace;
 }
 
 .empty-text.small {
@@ -753,4 +766,137 @@ body {
   margin-top: 20px;
   padding-top: 16px;
   border-top: 1px solid #444;
+}
+
+/* Copy button wrapper for positioning dialog */
+.copy-button-wrapper {
+  position: relative;
+}
+
+/* Copy dialog */
+.copy-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10000;
+  width: 300px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  padding: 12px;
+}
+
+/* Backdrop for dialog */
+.copy-dialog::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: -1;
+}
+
+.copy-dialog-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+}
+
+.copy-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  margin: 0 -8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.copy-option:hover {
+  background: #333;
+}
+
+.copy-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: #6b9fff;
+}
+
+.copy-option-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.copy-option-label {
+  font-size: 13px;
+  color: #e0e0e0;
+}
+
+.copy-option-path {
+  font-size: 11px;
+  color: #888;
+  font-family: 'SF Mono', Monaco, monospace;
+  word-break: break-all;
+  background: #1a1a1a;
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+
+.copy-custom-input {
+  width: 100%;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.copy-custom-input:focus {
+  outline: none;
+  border-color: #6b9fff;
+}
+
+.copy-dialog-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #333;
+}
+
+.copy-dialog-button {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.copy-dialog-button.cancel {
+  background: #333;
+  color: #888;
+}
+
+.copy-dialog-button.cancel:hover {
+  background: #444;
+  color: #e0e0e0;
+}
+
+.copy-dialog-button.confirm {
+  background: #6b9fff;
+  color: #fff;
+}
+
+.copy-dialog-button.confirm:hover {
+  background: #5a8fee;
 }

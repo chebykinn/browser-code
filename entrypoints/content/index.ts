@@ -1,5 +1,6 @@
 import { executeTool } from './tools';
 import { getVFS } from './vfs';
+import { getConsoleCollector } from './console/collector';
 import type { BackgroundToContentMessage } from '@/lib/types/messages';
 
 export default defineContentScript({
@@ -7,6 +8,9 @@ export default defineContentScript({
 
   async main() {
     console.log('[Page Editor] Content script loaded on:', window.location.href);
+
+    // Initialize console collector to receive messages from interceptor
+    getConsoleCollector().init();
 
     // Initialize VFS and run auto-edits/styles
     const vfs = getVFS();
@@ -48,9 +52,14 @@ async function handleMessage(message: BackgroundToContentMessage): Promise<unkno
     }
 
     case 'GET_VFS_FILES': {
-      const scripts = await vfs.listScripts();
-      const styles = await vfs.listStyles();
-      return { scripts, styles };
+      const scriptsResult = await vfs.listScripts();
+      const stylesResult = await vfs.listStyles();
+      return {
+        scripts: scriptsResult.files,
+        styles: stylesResult.files,
+        scriptsMatchedPattern: scriptsResult.matchedPattern,
+        stylesMatchedPattern: stylesResult.matchedPattern,
+      };
     }
 
     case 'DELETE_VFS_FILE': {

@@ -174,6 +174,26 @@ export const DOM_TOOLS: Tool[] = [
       required: [],
     },
   },
+  {
+    name: 'Screenshot',
+    description:
+      'Capture a screenshot of the current visible viewport. The screenshot is saved to screenshot.png and can be read via the Read tool.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        format: {
+          type: 'string',
+          enum: ['png', 'jpeg'],
+          description: 'Image format. Optional, defaults to png.',
+        },
+        quality: {
+          type: 'number',
+          description: 'JPEG quality (0-100). Only used for jpeg format. Optional.',
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 export const SYSTEM_PROMPT = `You are a web page editor assistant with a virtual filesystem.
@@ -182,6 +202,8 @@ The current page is exposed as a filesystem:
 
 /{domain}/{url-path}/
 ├── page.html        # Current page DOM (read/edit this to modify the page)
+├── console.log      # Browser console output (log, warn, error, info, debug)
+├── screenshot.png   # Latest screenshot (use Screenshot tool to capture)
 ├── scripts/         # Your JavaScript files (create, edit, execute)
 │   └── *.js
 └── styles/          # Your CSS files (auto-applied when saved)
@@ -202,6 +224,26 @@ Available tools:
 - Grep: Search text in files (use specific patterns to avoid large results)
 - Bash: Execute script file or inline JavaScript
 - Ls: List directory contents
+- Screenshot: Capture a screenshot of the visible viewport
+
+Reading console logs:
+\`\`\`
+Read { path: "console.log" }
+→ Returns timestamped console output:
+  [2024-01-15T10:30:00.000Z] [LOG  ] Page loaded
+  [2024-01-15T10:30:01.500Z] [ERROR] Failed to fetch data
+\`\`\`
+
+Taking screenshots:
+\`\`\`
+Screenshot { }
+→ Captures visible viewport and saves to screenshot.png
+Screenshot { format: "jpeg", quality: 80 }
+→ Captures as JPEG with specified quality
+
+Read { path: "screenshot.png" }
+→ Returns base64-encoded image data
+\`\`\`
 
 Workflow to modify the page:
 1. Read page.html → get content + version (e.g., v5)

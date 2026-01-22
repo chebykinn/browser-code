@@ -10,6 +10,118 @@ import type {
 } from '@/lib/types/messages';
 
 import type { Message } from '@/lib/types/messages';
+import { getConsoleInterceptorFunction } from '../content/console/interceptor';
+
+// ============================================================================
+// Route Matching Utilities (for dynamic routes like [slug] and [...slug])
+// ============================================================================
+
+interface RoutePatternInfo {
+  pattern: string;
+  regex: RegExp;
+  paramNames: string[];
+  isCatchAll: boolean;
+}
+
+function escapeRegexChars(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseRoutePatternForBackground(pattern: string): RoutePatternInfo {
+  const segments = pattern.split('/').filter(Boolean);
+  const paramNames: string[] = [];
+  let isCatchAll = false;
+  const regexParts: string[] = ['^'];
+
+  for (const segment of segments) {
+    const catchAllMatch = segment.match(/^\[\.\.\.(\w+)\]$/);
+    if (catchAllMatch) {
+      paramNames.push(catchAllMatch[1]);
+      isCatchAll = true;
+      regexParts.push('/(.+)');
+      continue;
+    }
+
+    const dynamicMatch = segment.match(/^\[(\w+)\]$/);
+    if (dynamicMatch) {
+      paramNames.push(dynamicMatch[1]);
+      regexParts.push('/([^/]+)');
+      continue;
+    }
+
+    regexParts.push('/' + escapeRegexChars(segment));
+  }
+
+  if (segments.length === 0) {
+    regexParts.push('/');
+  }
+
+  if (!isCatchAll) {
+    regexParts.push('/?$');
+  } else {
+    regexParts.push('$');
+  }
+
+  return {
+    pattern,
+    regex: new RegExp(regexParts.join('')),
+    paramNames,
+    isCatchAll,
+  };
+}
+
+function isDynamicPattern(path: string): boolean {
+  return /\[[\w.]+\]/.test(path);
+}
+
+function vfsPatternToMatchPattern(domain: string, vfsPath: string): string {
+  const matchPath = vfsPath
+    .replace(/\[\.\.\.[\w]+\]/g, '*')
+    .replace(/\[[\w]+\]/g, '*');
+  return `*://${domain}${matchPath}*`;
+}
+
+function wrapScriptWithParamExtraction(script: string, pattern: string): string {
+  const routePattern = parseRoutePatternForBackground(pattern);
+
+  if (routePattern.paramNames.length === 0) {
+    return script;
+  }
+
+  return `
+(function() {
+  var paramNames = ${JSON.stringify(routePattern.paramNames)};
+  var regex = ${routePattern.regex.toString()};
+  var isCatchAll = ${routePattern.isCatchAll};
+
+  var urlPath = window.location.pathname;
+  var match = urlPath.match(regex);
+
+  if (!match) {
+    console.log('[VFS] Route pattern mismatch, skipping script for pattern:', ${JSON.stringify(pattern)});
+    return;
+  }
+
+  var params = {};
+  for (var i = 0; i < paramNames.length; i++) {
+    var value = match[i + 1];
+    if (isCatchAll && i === paramNames.length - 1) {
+      params[paramNames[i]] = value.split('/');
+    } else {
+      params[paramNames[i]] = value;
+    }
+  }
+
+  window.__routeParams = window.__routeParams || {};
+  Object.assign(window.__routeParams, params);
+  console.log('[VFS] Route params:', params);
+
+  ${script}
+})();
+`;
+}
+
+// ============================================================================
 
 // Store active sidebar connections by sidebarId - supports multiple windows
 type Port = ReturnType<typeof browser.runtime.connect>;
@@ -26,6 +138,13 @@ export default defineBackground(() => {
 
   // Initialize userScripts API for running user scripts (Chrome MV3)
   initUserScripts();
+
+  // Inject console interceptor when tabs load
+  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') {
+      injectConsoleInterceptor(tabId);
+    }
+  });
 
   // Handle connections from sidebar
   browser.runtime.onConnect.addListener((port) => {
@@ -342,7 +461,7 @@ async function handleMessage(
 
     case 'COPY_VFS_FILE': {
       try {
-        const { sourceDomain, sourceUrlPath, fileType, fileName, targetTabId } = message;
+        const { sourceDomain, sourceUrlPath, fileType, fileName, targetTabId, targetPath } = message;
         const storageKey = `vfs:${sourceDomain}`;
 
         // Get source file
@@ -361,7 +480,7 @@ async function handleMessage(
           return { success: false, error: 'Source file not found' };
         }
 
-        // Get target tab's URL to determine target domain/path
+        // Get target tab's URL to determine target domain
         const tab = await browser.tabs.get(targetTabId);
         if (!tab.url) {
           return { success: false, error: 'Cannot determine target URL' };
@@ -369,8 +488,11 @@ async function handleMessage(
 
         const targetUrl = new URL(tab.url);
         const targetDomain = targetUrl.hostname;
-        const targetUrlPath = targetUrl.pathname;
+        // Use custom targetPath if provided, otherwise use tab's pathname
+        const targetUrlPath = targetPath || targetUrl.pathname;
         const targetStorageKey = `vfs:${targetDomain}`;
+
+        console.log('[Page Editor] Copying file to path:', targetUrlPath, targetPath ? '(custom)' : '(from tab)');
 
         // Get or create target storage
         const targetResult = await browser.storage.local.get(targetStorageKey);
@@ -457,6 +579,35 @@ async function handleMessage(
       // Check if userScripts API is available
       const available = getUserScriptsAPI() !== undefined;
       return { available };
+    }
+
+    case 'CAPTURE_SCREENSHOT': {
+      try {
+        const tabId = sender.tab?.id;
+        if (!tabId) {
+          return { success: false, error: 'No tab ID available' };
+        }
+
+        const format = (message as { format?: 'png' | 'jpeg' }).format || 'png';
+        const quality = (message as { quality?: number }).quality;
+
+        const options: { format: 'png' | 'jpeg'; quality?: number } = { format };
+        if (format === 'jpeg' && quality !== undefined) {
+          options.quality = quality;
+        }
+
+        // @ts-expect-error - webextension-polyfill types are too strict, undefined works for current window
+        const dataUrl = await browser.tabs.captureVisibleTab(undefined, options);
+
+        return {
+          success: true,
+          dataUrl,
+          format,
+        };
+      } catch (error) {
+        console.error('[Page Editor] CAPTURE_SCREENSHOT error:', error);
+        return { success: false, error: String(error) };
+      }
     }
 
     case 'EXECUTE_IN_MAIN_WORLD': {
@@ -632,6 +783,24 @@ function sendToSidebar(
   }
 }
 
+/**
+ * Inject console interceptor into the page's MAIN world.
+ * This captures console.log/warn/error/info/debug calls.
+ */
+async function injectConsoleInterceptor(tabId: number): Promise<void> {
+  try {
+    await browser.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: getConsoleInterceptorFunction(),
+      injectImmediately: true,
+    });
+  } catch (error) {
+    // Silently fail - this is expected for special pages like about:, chrome:, etc.
+    // console.log('[Page Editor] Console interceptor injection skipped:', tabId);
+  }
+}
+
 // UserScripts API interface (works for both Chrome and Firefox MV3)
 interface UserScriptsAPI {
   configureWorld: (config: { csp?: string; messaging?: boolean }) => Promise<void>;
@@ -771,15 +940,21 @@ async function syncUserScripts(): Promise<void> {
         for (const [scriptName, scriptFile] of Object.entries(pathData.scripts)) {
           const scriptId = `vfs_${domain}_${urlPath}_${scriptName}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
-          // Create match pattern for this domain/path
-          const matchPattern = `*://${domain}${urlPath}*`;
+          // Create match pattern for this domain/path (supports dynamic routes)
+          const matchPattern = vfsPatternToMatchPattern(domain, urlPath);
 
-          console.log('[Page Editor] Found script:', scriptName, 'for pattern:', matchPattern);
+          // Wrap script with param extraction if it's a dynamic route
+          const wrappedScript = isDynamicPattern(urlPath)
+            ? wrapScriptWithParamExtraction(scriptFile.content, urlPath)
+            : scriptFile.content;
+
+          console.log('[Page Editor] Found script:', scriptName, 'for pattern:', matchPattern,
+            isDynamicPattern(urlPath) ? '(dynamic route)' : '(exact match)');
 
           scriptsToRegister.push({
             id: scriptId,
             matches: [matchPattern],
-            js: [{ code: scriptFile.content }],
+            js: [{ code: wrappedScript }],
             runAt: 'document_idle',
             world: 'MAIN',
           });
