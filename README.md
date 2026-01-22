@@ -4,6 +4,12 @@ A coding agent that lives inside your browser. Think Claude Code, but for web pa
 
 > **Note:** This extension is heavily vibe coded. Don't have high expectations.
 
+
+https://github.com/user-attachments/assets/bb5c1662-6350-4bbf-94d2-ceb07ea0acfc
+
+
+
+
 ## Overview
 
 Browser Code lets you use AI to modify and automate web pages. It provides Claude with a virtual filesystem view of the current page, where the DOM becomes a file you can read, edit, and script against.
