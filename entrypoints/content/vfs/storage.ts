@@ -16,6 +16,14 @@
 import type { StoredFile, DomainStorage, EditRecord, VFSError, FileType, FileListResult, FileReadResult } from './types';
 import { findMatchingRoutes, type RouteMatch } from './route-matcher';
 
+/**
+ * Normalize a URL path by removing trailing slashes (except for root "/")
+ */
+function normalizePath(path: string): string {
+  if (path === '/' || path === '') return '/';
+  return path.replace(/\/+$/, '');
+}
+
 export interface StoredScreenshot {
   dataUrl: string;
   version: number;
@@ -34,7 +42,7 @@ export class VFSStorage {
 
   constructor(domain: string, urlPath: string) {
     this.domain = domain;
-    this.defaultUrlPath = urlPath;
+    this.defaultUrlPath = normalizePath(urlPath);
     this.storageKey = `vfs:${domain}`;
   }
 
@@ -104,7 +112,7 @@ export class VFSStorage {
     urlPath?: string
   ): Promise<FileReadResult> {
     const data = await this.load();
-    const targetPath = urlPath || this.defaultUrlPath;
+    const targetPath = normalizePath(urlPath || this.defaultUrlPath);
 
     // First try exact match
     if (data.paths[targetPath]) {
@@ -156,7 +164,7 @@ export class VFSStorage {
     urlPath?: string
   ): Promise<{ success: true; version: number } | VFSError> {
     const data = await this.load();
-    const path = urlPath || this.defaultUrlPath;
+    const path = normalizePath(urlPath || this.defaultUrlPath);
 
     this.ensurePath(data, path);
 
@@ -197,7 +205,7 @@ export class VFSStorage {
    */
   async deleteFile(type: FileType, name: string, urlPath?: string): Promise<boolean> {
     const data = await this.load();
-    const path = urlPath || this.defaultUrlPath;
+    const path = normalizePath(urlPath || this.defaultUrlPath);
 
     if (!data.paths[path]) {
       return false;
@@ -222,7 +230,7 @@ export class VFSStorage {
   async findMatchingPaths(urlPath: string): Promise<RouteMatch[]> {
     const data = await this.load();
     const storedPaths = Object.keys(data.paths);
-    return findMatchingRoutes(urlPath, storedPaths);
+    return findMatchingRoutes(normalizePath(urlPath), storedPaths);
   }
 
   /**
@@ -234,7 +242,7 @@ export class VFSStorage {
     urlPath?: string
   ): Promise<FileListResult> {
     const data = await this.load();
-    const targetPath = urlPath || this.defaultUrlPath;
+    const targetPath = normalizePath(urlPath || this.defaultUrlPath);
 
     // First try exact match (backwards compatible)
     if (data.paths[targetPath]) {
@@ -290,19 +298,20 @@ export class VFSStorage {
    */
   async addEditRecord(urlPath: string, record: EditRecord): Promise<void> {
     const data = await this.load();
-    this.ensurePath(data, urlPath);
+    const path = normalizePath(urlPath);
+    this.ensurePath(data, path);
 
     // Check if we already have a similar edit (same selector and oldContent)
-    const existing = data.paths[urlPath].editRecords.findIndex(
+    const existing = data.paths[path].editRecords.findIndex(
       r => r.selector === record.selector && r.oldContent === record.oldContent
     );
 
     if (existing >= 0) {
       // Update existing record
-      data.paths[urlPath].editRecords[existing] = record;
+      data.paths[path].editRecords[existing] = record;
     } else {
       // Add new record
-      data.paths[urlPath].editRecords.push(record);
+      data.paths[path].editRecords.push(record);
     }
 
     await this.save();
@@ -313,12 +322,13 @@ export class VFSStorage {
    */
   async getEditRecords(urlPath: string): Promise<EditRecord[]> {
     const data = await this.load();
+    const path = normalizePath(urlPath);
 
-    if (!data.paths[urlPath]) {
+    if (!data.paths[path]) {
       return [];
     }
 
-    return data.paths[urlPath].editRecords || [];
+    return data.paths[path].editRecords || [];
   }
 
   /**
@@ -326,9 +336,10 @@ export class VFSStorage {
    */
   async clearEditRecords(urlPath: string): Promise<void> {
     const data = await this.load();
+    const path = normalizePath(urlPath);
 
-    if (data.paths[urlPath]) {
-      data.paths[urlPath].editRecords = [];
+    if (data.paths[path]) {
+      data.paths[path].editRecords = [];
       await this.save();
     }
   }
@@ -353,7 +364,7 @@ export class VFSStorage {
    * Save a screenshot (in-memory only, not persisted)
    */
   saveScreenshot(urlPath: string, dataUrl: string, format: 'png' | 'jpeg'): StoredScreenshot {
-    const key = `${this.domain}:${urlPath}`;
+    const key = `${this.domain}:${normalizePath(urlPath)}`;
     const existing = screenshotCache.get(key);
     const screenshot: StoredScreenshot = {
       dataUrl,
@@ -370,7 +381,7 @@ export class VFSStorage {
    * Get the latest screenshot (in-memory)
    */
   getScreenshot(urlPath: string): StoredScreenshot | null {
-    const key = `${this.domain}:${urlPath}`;
+    const key = `${this.domain}:${normalizePath(urlPath)}`;
     return screenshotCache.get(key) || null;
   }
 }

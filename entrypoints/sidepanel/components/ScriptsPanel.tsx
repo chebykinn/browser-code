@@ -2,6 +2,14 @@ import { useState, useEffect, useRef } from 'react';
 import type { VfsExportData } from '@/lib/types/messages';
 import { CopyDialog, type CopyTarget } from './CopyDialog';
 
+/**
+ * Normalize a URL path by removing trailing slashes (except for root "/")
+ */
+function normalizePath(path: string): string {
+  if (path === '/' || path === '') return '/';
+  return path.replace(/\/+$/, '');
+}
+
 interface VfsFile {
   name: string;
   version: number;
@@ -75,7 +83,7 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
       if (tab.url) {
         const url = new URL(tab.url);
         setCurrentDomain(url.hostname);
-        setCurrentPath(url.pathname);
+        setCurrentPath(normalizePath(url.pathname));
       }
 
       // Get all files across all domains
@@ -276,9 +284,15 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
     }
   };
 
-  // Check if a domain/path is the current page
+  // Check if a domain/path is the current page (or a pattern that matched the current page)
   const isCurrentPage = (domain: string, urlPath: string) => {
-    return domain === currentDomain && urlPath === currentPath;
+    if (domain !== currentDomain) return false;
+    const normalizedUrlPath = normalizePath(urlPath);
+    if (normalizedUrlPath === currentPath) return true;
+    // Also consider as "current page" if files were matched from this pattern
+    if (scriptsMatchedPattern && normalizedUrlPath === normalizePath(scriptsMatchedPattern)) return true;
+    if (stylesMatchedPattern && normalizedUrlPath === normalizePath(stylesMatchedPattern)) return true;
+    return false;
   };
 
   // Get other domains/paths (not current)

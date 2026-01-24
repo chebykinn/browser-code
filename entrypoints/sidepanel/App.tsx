@@ -20,9 +20,6 @@ interface Message {
   }>;
 }
 
-// Generate unique sidebar ID at module level - persists across re-renders
-const SIDEBAR_ID = crypto.randomUUID();
-
 export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -31,6 +28,7 @@ export function App() {
   const [showScripts, setShowScripts] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [tabId, setTabId] = useState<number | null>(null);
+  const [pageUrl, setPageUrl] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   type Port = ReturnType<typeof browser.runtime.connect>;
   const portRef = useRef<Port | null>(null);
@@ -94,20 +92,20 @@ export function App() {
             }
           }
           setMessages(uiMessages);
-          console.log(`[Sidebar ${SIDEBAR_ID.slice(0,8)}] Restored ${uiMessages.length} messages from history`);
+          console.log(`[Sidebar tab:${tab.id}] Restored ${uiMessages.length} messages from history`);
         }
       }
     }
 
     init();
 
-    // Listen for tab changes to warn user
+    // Listen for tab changes and switch to new tab
     const handleTabActivated = (activeInfo: { tabId: number }) => {
       setTabId((currentTabId) => {
         if (currentTabId && activeInfo.tabId !== currentTabId) {
           console.log('[Page Editor] Tab changed from', currentTabId, 'to', activeInfo.tabId);
         }
-        return currentTabId; // Keep original tab
+        return activeInfo.tabId; // Switch to new tab
       });
     };
 
@@ -117,23 +115,26 @@ export function App() {
     };
   }, []);
 
-  // Set up port connection to background
+  // Set up port connection to background - keyed by tabId for reconnection support
   useEffect(() => {
-    console.log(`[Sidebar ${SIDEBAR_ID.slice(0,8)}] Setting up port connection...`);
-    // Include sidebarId in port name so background can identify us
-    const port = browser.runtime.connect({ name: `sidebar:${SIDEBAR_ID}` });
+    // Wait for tabId before connecting
+    if (!tabId) return;
+
+    console.log(`[Sidebar tab:${tabId}] Setting up port connection...`);
+    // Use tabId in port name so background can route messages after reconnection
+    const port = browser.runtime.connect({ name: `sidebar:tab:${tabId}` });
     portRef.current = port;
 
     const messageHandler = (message: BackgroundToSidebarMessage) => {
-      console.log(`[Sidebar ${SIDEBAR_ID.slice(0,8)}] Received message:`, message.type);
+      console.log(`[Sidebar tab:${tabId}] Received message:`, message.type);
 
       switch (message.type) {
         case 'AGENT_RESPONSE': {
-          console.log(`[Sidebar ${SIDEBAR_ID.slice(0,8)}] AGENT_RESPONSE`);
+          console.log(`[Sidebar tab:${tabId}] AGENT_RESPONSE`);
           const content = message.content;
           setTimeout(() => {
             setMessagesRef.current((prev) => {
-              console.log(`[Sidebar ${SIDEBAR_ID.slice(0,8)}] setMessages prev:`, prev.length);
+              console.log(`[Sidebar tab:${tabId}] setMessages prev:`, prev.length);
               const lastMessage = prev[prev.length - 1];
               if (lastMessage?.role === 'assistant') {
                 return [
@@ -230,15 +231,76 @@ export function App() {
     port.onMessage.addListener(messageHandler);
 
     port.onDisconnect.addListener(() => {
-      console.log('[Page Editor Sidebar] Port disconnected');
+      console.log(`[Sidebar tab:${tabId}] Port disconnected`);
     });
 
-    console.log('[Page Editor Sidebar] Port connected');
+    console.log(`[Sidebar tab:${tabId}] Port connected`);
 
     return () => {
       port.disconnect();
     };
-  }, []);
+  }, [tabId]);
+
+  // Re-fetch history and URL when tab changes
+  useEffect(() => {
+    if (!tabId) return;
+    const currentTabId = tabId; // Capture for use in async function
+
+    // Reset loading state when switching tabs
+    setIsLoading(false);
+
+    async function fetchTabData() {
+      // Get tab URL
+      try {
+        const tab = await browser.tabs.get(currentTabId);
+        setPageUrl(tab.url || null);
+      } catch {
+        setPageUrl(null);
+      }
+
+      // Get history
+      console.log(`[Sidebar tab:${currentTabId}] Fetching history for tab change`);
+      const historyResponse = await browser.runtime.sendMessage({
+        type: 'GET_HISTORY',
+        tabId: currentTabId,
+      });
+      if (historyResponse.history && historyResponse.history.length > 0) {
+        // Convert backend history to UI messages
+        const uiMessages: Message[] = [];
+        for (const msg of historyResponse.history) {
+          if (msg.role === 'user') {
+            // Skip tool_result messages (they have array content with tool_result type)
+            if (Array.isArray(msg.content) && msg.content[0]?.type === 'tool_result') {
+              continue;
+            }
+            uiMessages.push({
+              id: crypto.randomUUID(),
+              role: 'user',
+              content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+            });
+          } else if (msg.role === 'assistant') {
+            const content = msg.content as AssistantContent[];
+            const toolCalls = content
+              .filter((b): b is { type: 'tool_use'; id: string; name: string; input: unknown } => b.type === 'tool_use')
+              .map((tc) => ({ name: tc.name, input: tc.input, id: tc.id }));
+            uiMessages.push({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content,
+              toolCalls,
+            });
+          }
+        }
+        setMessages(uiMessages);
+        console.log(`[Sidebar tab:${currentTabId}] Restored ${uiMessages.length} messages from history`);
+      } else {
+        setMessages([]); // Clear messages if new tab has no history
+        console.log(`[Sidebar tab:${currentTabId}] No history found, cleared messages`);
+      }
+    }
+
+    fetchTabData();
+  }, [tabId]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -257,7 +319,6 @@ export function App() {
       await browser.runtime.sendMessage({
         type: 'STOP_AGENT',
         tabId,
-        sidebarId: SIDEBAR_ID,
       });
     }
 
@@ -275,7 +336,6 @@ export function App() {
         type: 'CHAT_MESSAGE',
         content: userMessage,
         tabId,
-        sidebarId: SIDEBAR_ID,
       });
     } catch (error) {
       setIsLoading(false);
@@ -316,7 +376,6 @@ export function App() {
       await browser.runtime.sendMessage({
         type: 'STOP_AGENT',
         tabId,
-        sidebarId: SIDEBAR_ID,
       });
       setIsLoading(false);
     } catch (error) {
@@ -372,6 +431,12 @@ export function App() {
           </button>
         </div>
       </header>
+
+      {pageUrl && (
+        <div className="page-url" title={pageUrl}>
+          {pageUrl}
+        </div>
+      )}
 
       <div className="messages">
         {messages.length === 0 && (

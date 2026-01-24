@@ -5,7 +5,6 @@ export interface ChatMessage {
   type: 'CHAT_MESSAGE';
   content: string;
   tabId: number;
-  sidebarId: string;
 }
 
 export interface GetSettingsMessage {
@@ -52,7 +51,6 @@ export interface ClearHistoryMessage {
 export interface StopAgentMessage {
   type: 'STOP_AGENT';
   tabId: number;
-  sidebarId: string;
 }
 
 export interface GetHistoryMessage {

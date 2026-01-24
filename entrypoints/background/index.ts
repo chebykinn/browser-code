@@ -123,15 +123,15 @@ function wrapScriptWithParamExtraction(script: string, pattern: string): string 
 
 // ============================================================================
 
-// Store active sidebar connections by sidebarId - supports multiple windows
+// Store active sidebar connections by tabId - supports reconnection after tab switch
 type Port = ReturnType<typeof browser.runtime.connect>;
-const sidebarPorts = new Map<string, Port>();
+const sidebarPorts = new Map<number, Port>();
 
 // Store conversation history per tab (tabId -> messages)
 const conversationHistory = new Map<number, Message[]>();
 
-// Store active agent AbortControllers per sidebarId
-const activeAgents = new Map<string, AbortController>();
+// Store active agent AbortControllers per tabId
+const activeAgents = new Map<number, AbortController>();
 
 export default defineBackground(() => {
   console.log('[Page Editor] Background script loaded');
@@ -148,18 +148,25 @@ export default defineBackground(() => {
 
   // Handle connections from sidebar
   browser.runtime.onConnect.addListener((port) => {
-    // Port name format: "sidebar:{sidebarId}"
-    if (!port.name.startsWith('sidebar:')) return;
+    // Port name format: "sidebar:tab:{tabId}"
+    if (!port.name.startsWith('sidebar:tab:')) return;
 
-    const sidebarId = port.name.replace('sidebar:', '');
-    console.log('[Page Editor] Sidebar connected, sidebarId:', sidebarId.slice(0, 8));
+    const tabIdStr = port.name.replace('sidebar:tab:', '');
+    const tabId = parseInt(tabIdStr, 10);
+    if (isNaN(tabId)) {
+      console.error('[Page Editor] Invalid tabId in port name:', port.name);
+      return;
+    }
+    console.log('[Page Editor] Sidebar connected for tabId:', tabId);
 
-    sidebarPorts.set(sidebarId, port);
+    // Replace old port if reconnecting (this is the key fix for tab switching)
+    sidebarPorts.set(tabId, port);
 
     port.onDisconnect.addListener(() => {
-      console.log('[Page Editor] Port disconnected, sidebarId:', sidebarId.slice(0, 8));
-      if (sidebarPorts.get(sidebarId) === port) {
-        sidebarPorts.delete(sidebarId);
+      console.log('[Page Editor] Port disconnected for tabId:', tabId);
+      // Only delete if this is still the current port (prevents race conditions)
+      if (sidebarPorts.get(tabId) === port) {
+        sidebarPorts.delete(tabId);
       }
     });
   });
@@ -212,22 +219,18 @@ async function handleMessage(
       }
 
       const tabId = message.tabId;
-      const sidebarId = message.sidebarId;
-      console.log('[Page Editor] CHAT_MESSAGE received, tabId:', tabId, 'sidebarId:', sidebarId.slice(0, 8));
+      console.log('[Page Editor] CHAT_MESSAGE received, tabId:', tabId);
 
-      const port = sidebarPorts.get(sidebarId);
-      console.log('[Page Editor] Got port for sidebarId', sidebarId.slice(0, 8), ':', !!port);
-
-      // Cancel any existing agent for this sidebar
-      const existingController = activeAgents.get(sidebarId);
+      // Cancel any existing agent for this tab
+      const existingController = activeAgents.get(tabId);
       if (existingController) {
-        console.log('[Page Editor] Aborting previous agent for sidebarId:', sidebarId.slice(0, 8));
+        console.log('[Page Editor] Aborting previous agent for tabId:', tabId);
         existingController.abort();
       }
 
       // Create new AbortController for this agent run
       const abortController = new AbortController();
-      activeAgents.set(sidebarId, abortController);
+      activeAgents.set(tabId, abortController);
 
       // Get or create conversation history for this tab
       if (!conversationHistory.has(tabId)) {
@@ -236,6 +239,7 @@ async function handleMessage(
       const history = conversationHistory.get(tabId)!;
 
       // Run the agent with existing history
+      // CRITICAL: Use LIVE port lookup in callbacks so reconnecting sidebar receives messages
       await runAgent(message.content, {
         apiKey: settings.apiKey,
         model: settings.model,
@@ -244,13 +248,16 @@ async function handleMessage(
         abortSignal: abortController.signal,
         callbacks: {
           onAssistantMessage: (content: AssistantContent[]) => {
-            sendToSidebar(port, {
+            // Live lookup: get current port for this tab (may have reconnected)
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, {
               type: 'AGENT_RESPONSE',
               content,
             });
           },
           onToolCall: (toolName, input, toolCallId) => {
-            sendToSidebar(port, {
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, {
               type: 'TOOL_CALL',
               toolName,
               input,
@@ -258,19 +265,22 @@ async function handleMessage(
             });
           },
           onToolResult: (toolCallId, result) => {
-            sendToSidebar(port, {
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, {
               type: 'TOOL_RESULT',
               toolCallId,
               result: result as never,
             });
           },
           onDone: () => {
-            activeAgents.delete(sidebarId);
-            sendToSidebar(port, { type: 'AGENT_DONE' });
+            activeAgents.delete(tabId);
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, { type: 'AGENT_DONE' });
           },
           onError: (error) => {
-            activeAgents.delete(sidebarId);
-            sendToSidebar(port, { type: 'AGENT_ERROR', error });
+            activeAgents.delete(tabId);
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, { type: 'AGENT_ERROR', error });
           },
         },
       });
@@ -279,12 +289,12 @@ async function handleMessage(
     }
 
     case 'STOP_AGENT': {
-      const sidebarId = message.sidebarId;
-      const controller = activeAgents.get(sidebarId);
+      const tabId = message.tabId;
+      const controller = activeAgents.get(tabId);
       if (controller) {
-        console.log('[Page Editor] Stopping agent for sidebarId:', sidebarId.slice(0, 8));
+        console.log('[Page Editor] Stopping agent for tabId:', tabId);
         controller.abort();
-        activeAgents.delete(sidebarId);
+        activeAgents.delete(tabId);
       }
       return { success: true };
     }
@@ -306,7 +316,13 @@ async function handleMessage(
     case 'GET_VFS_FILES': {
       const tabId = message.tabId;
       try {
-        const response = await sendToContentScript(tabId, { type: 'GET_VFS_FILES' });
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Content script timeout - page may need refresh')), 5000)
+        );
+        const response = await Promise.race([
+          sendToContentScript(tabId, { type: 'GET_VFS_FILES' }),
+          timeoutPromise
+        ]);
         return response;
       } catch (error) {
         console.error('[Page Editor] GET_VFS_FILES error:', error);

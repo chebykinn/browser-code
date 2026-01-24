@@ -9,14 +9,8 @@ export default defineContentScript({
   async main() {
     console.log('[Page Editor] Content script loaded on:', window.location.href);
 
-    // Initialize console collector to receive messages from interceptor
-    getConsoleCollector().init();
-
-    // Initialize VFS and run auto-edits/styles
-    const vfs = getVFS();
-    await vfs.runAutoEdits();
-
-    // Listen for messages from background script
+    // Register message listener FIRST to avoid race condition with background script
+    // The background script waits 100ms after injecting, so listener must be ready immediately
     browser.runtime.onMessage.addListener(
       (message: BackgroundToContentMessage, _sender, sendResponse) => {
         console.log('[Page Editor] Content script received message:', message.type);
@@ -34,6 +28,13 @@ export default defineContentScript({
         return true;
       }
     );
+
+    // Initialize console collector to receive messages from interceptor
+    getConsoleCollector().init();
+
+    // Initialize VFS and run auto-edits/styles (can take time, but listener is already ready)
+    const vfs = getVFS();
+    await vfs.runAutoEdits();
   },
 });
 

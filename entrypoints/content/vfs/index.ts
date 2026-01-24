@@ -62,6 +62,14 @@ function executeInPageContextNoResult(code: string): void {
   });
 }
 
+/**
+ * Normalize a URL path by removing trailing slashes (except for root "/")
+ */
+function normalizePath(path: string): string {
+  if (path === '/' || path === '') return '/';
+  return path.replace(/\/+$/, '');
+}
+
 export class VirtualFS {
   private pageSync: PageSync;
   private storage: VFSStorage;
@@ -71,7 +79,7 @@ export class VirtualFS {
   constructor() {
     const url = new URL(window.location.href);
     this.domain = url.hostname;
-    this.urlPath = url.pathname;
+    this.urlPath = normalizePath(url.pathname);
     this.pageSync = new PageSync();
     this.storage = new VFSStorage(this.domain, this.urlPath);
   }

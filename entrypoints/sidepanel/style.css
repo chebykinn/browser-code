@@ -77,6 +77,19 @@ body {
   cursor: not-allowed;
 }
 
+/* Page URL */
+.page-url {
+  padding: 6px 16px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  font-size: 11px;
+  color: #888;
+  font-family: 'SF Mono', Monaco, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Messages */
 .messages {
   flex: 1;
