@@ -6,6 +6,8 @@ Browser Code is a browser extension that gives Claude a virtual filesystem view 
 
 Think Claude Code, but for the DOM.
 
+https://github.com/user-attachments/assets/bb5c1662-6350-4bbf-94d2-ceb07ea0acfc
+
 ## How It Works
 
 1. **Agent sees the page as a filesystem** - The DOM becomes `page.html`, console output is `console.log`, and you can create scripts in `./scripts/` and styles in `./styles/`
