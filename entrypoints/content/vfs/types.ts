@@ -57,7 +57,7 @@ export interface DomainStorage {
   }>;
 }
 
-export type FileType = 'page' | 'script' | 'style' | 'console' | 'screenshot';
+export type FileType = 'page' | 'script' | 'style' | 'console' | 'screenshot' | 'plan';
 
 export interface ParsedPath {
   domain: string;

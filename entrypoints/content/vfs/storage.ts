@@ -34,6 +34,14 @@ export interface StoredScreenshot {
 // In-memory screenshot storage (per URL path, not persisted)
 const screenshotCache = new Map<string, StoredScreenshot>();
 
+// In-memory plan storage (per URL path, not persisted - session specific)
+export interface StoredPlan {
+  content: string;
+  version: number;
+  modified: number;
+}
+const planCache = new Map<string, StoredPlan>();
+
 export class VFSStorage {
   private domain: string;
   private defaultUrlPath: string;
@@ -383,5 +391,48 @@ export class VFSStorage {
   getScreenshot(urlPath: string): StoredScreenshot | null {
     const key = `${this.domain}:${normalizePath(urlPath)}`;
     return screenshotCache.get(key) || null;
+  }
+
+  /**
+   * Save a plan file (in-memory only, not persisted - session specific)
+   */
+  savePlan(urlPath: string, content: string, expectedVersion: number): { success: true; version: number } | { code: string; message: string } {
+    const key = `${this.domain}:${normalizePath(urlPath)}`;
+    const existing = planCache.get(key);
+
+    // Check version (0 means new file)
+    if (expectedVersion !== 0 && existing && existing.version !== expectedVersion) {
+      return {
+        code: 'VERSION_MISMATCH',
+        message: `Plan changed since last read (v${expectedVersion} → v${existing.version}). Re-read required.`,
+      };
+    }
+
+    const newVersion = existing ? existing.version + 1 : 1;
+    const plan: StoredPlan = {
+      content,
+      version: newVersion,
+      modified: Date.now(),
+    };
+    planCache.set(key, plan);
+    console.log('[VFS Storage] Plan saved for:', key);
+    return { success: true, version: newVersion };
+  }
+
+  /**
+   * Get the current plan (in-memory)
+   */
+  getPlan(urlPath: string): StoredPlan | null {
+    const key = `${this.domain}:${normalizePath(urlPath)}`;
+    return planCache.get(key) || null;
+  }
+
+  /**
+   * Clear the plan (in-memory)
+   */
+  clearPlan(urlPath: string): void {
+    const key = `${this.domain}:${normalizePath(urlPath)}`;
+    planCache.delete(key);
+    console.log('[VFS Storage] Plan cleared for:', key);
   }
 }

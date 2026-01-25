@@ -6,6 +6,8 @@ import type {
   BackgroundToSidebarMessage,
   AssistantContent,
   Settings,
+  AgentMode,
+  TodoItem,
 } from '@/lib/types/messages';
 
 interface Message {
@@ -29,6 +31,9 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [tabId, setTabId] = useState<number | null>(null);
   const [pageUrl, setPageUrl] = useState<string | null>(null);
+  const [mode, setMode] = useState<AgentMode>('plan');
+  const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [awaitingApproval, setAwaitingApproval] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   type Port = ReturnType<typeof browser.runtime.connect>;
   const portRef = useRef<Port | null>(null);
@@ -37,8 +42,14 @@ export function App() {
   // Refs to always get latest state setters (fixes React Strict Mode issues)
   const setMessagesRef = useRef(setMessages);
   const setIsLoadingRef = useRef(setIsLoading);
+  const setModeRef = useRef(setMode);
+  const setTodosRef = useRef(setTodos);
+  const setAwaitingApprovalRef = useRef(setAwaitingApproval);
   setMessagesRef.current = setMessages;
   setIsLoadingRef.current = setIsLoading;
+  setModeRef.current = setMode;
+  setTodosRef.current = setTodos;
+  setAwaitingApprovalRef.current = setAwaitingApproval;
 
   // Load settings and get current tab
   useEffect(() => {
@@ -56,6 +67,17 @@ export function App() {
       // Check if API key is configured
       if (!response.apiKey) {
         setShowSettings(true);
+      }
+
+      // Get mode and todos for this tab
+      if (tab?.id) {
+        const modeResponse = await browser.runtime.sendMessage({
+          type: 'GET_MODE',
+          tabId: tab.id,
+        });
+        setMode(modeResponse.mode || 'plan');
+        setTodos(modeResponse.todos || []);
+        setAwaitingApproval(modeResponse.awaitingApproval || false);
       }
 
       // Restore conversation history from backend (if we have a tab)
@@ -206,7 +228,27 @@ export function App() {
         }
 
         case 'AGENT_DONE': {
-          setTimeout(() => setIsLoadingRef.current(false), 0);
+          setTimeout(() => {
+            setIsLoadingRef.current(false);
+            // Check if we're awaiting approval after plan mode completes
+            browser.runtime.sendMessage({ type: 'GET_MODE', tabId }).then((response) => {
+              setAwaitingApprovalRef.current(response.awaitingApproval || false);
+            });
+          }, 0);
+          break;
+        }
+
+        case 'MODE_CHANGED': {
+          setTimeout(() => {
+            setModeRef.current(message.mode);
+            // Clear awaiting approval when mode changes
+            setAwaitingApprovalRef.current(false);
+          }, 0);
+          break;
+        }
+
+        case 'TODOS_UPDATED': {
+          setTimeout(() => setTodosRef.current(message.todos), 0);
           break;
         }
 
@@ -257,6 +299,15 @@ export function App() {
       } catch {
         setPageUrl(null);
       }
+
+      // Get mode and todos
+      const modeResponse = await browser.runtime.sendMessage({
+        type: 'GET_MODE',
+        tabId: currentTabId,
+      });
+      setMode(modeResponse.mode || 'plan');
+      setTodos(modeResponse.todos || []);
+      setAwaitingApproval(modeResponse.awaitingApproval || false);
 
       // Get history
       console.log(`[Sidebar tab:${currentTabId}] Fetching history for tab change`);
@@ -383,6 +434,42 @@ export function App() {
     }
   };
 
+  const handleApprovePlan = async () => {
+    if (!tabId) return;
+    setAwaitingApproval(false);
+    setIsLoading(true);
+    setMessages([]); // Clear messages for fresh execution
+    try {
+      await browser.runtime.sendMessage({
+        type: 'APPROVE_PLAN',
+        tabId,
+      });
+    } catch (error) {
+      console.error('[Page Editor] Error approving plan:', error);
+      setIsLoading(false);
+    }
+  };
+
+  const handleRejectPlan = () => {
+    // Just dismiss the approval UI - user can type feedback in the chat
+    setAwaitingApproval(false);
+  };
+
+  const handleToggleMode = async () => {
+    if (!tabId || isLoading) return;
+    const newMode = mode === 'plan' ? 'execute' : 'plan';
+    try {
+      await browser.runtime.sendMessage({
+        type: 'SET_MODE',
+        tabId,
+        mode: newMode,
+      });
+      setMode(newMode);
+    } catch (error) {
+      console.error('[Page Editor] Error toggling mode:', error);
+    }
+  };
+
   if (showSettings) {
     return (
       <SettingsPanel
@@ -407,6 +494,14 @@ export function App() {
       <header className="header">
         <h1>Browser Code</h1>
         <div className="header-buttons">
+          <button
+            className={`mode-indicator ${mode}`}
+            onClick={handleToggleMode}
+            disabled={isLoading}
+            title={mode === 'plan' ? 'Plan Mode: Agent creates a plan first' : 'Execute Mode: Agent executes directly'}
+          >
+            {mode === 'plan' ? 'Plan' : 'Exec'}
+          </button>
           <button
             className="header-button"
             onClick={handleNewChat}
@@ -463,12 +558,25 @@ export function App() {
         <div ref={messagesEndRef} />
       </div>
 
+      {awaitingApproval && !isLoading && (
+        <div className="plan-approval">
+          <div className="plan-approval-buttons">
+            <button className="approve-button" onClick={handleApprovePlan}>
+              Approve & Execute
+            </button>
+            <button className="reject-button" onClick={handleRejectPlan}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       <form className="input-form" onSubmit={handleSubmit}>
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={isLoading ? "Type follow-up message..." : "Ask me to modify this page..."}
+          placeholder={awaitingApproval ? "Type feedback to revise plan..." : isLoading ? "Type follow-up message..." : "Ask me to modify this page..."}
           disabled={!tabId}
         />
         {isLoading ? (

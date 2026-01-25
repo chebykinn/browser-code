@@ -71,6 +71,30 @@ function ToolCallDisplay({ toolCall }: { toolCall: ToolCall }) {
     toolCall.result !== null &&
     'error' in toolCall.result;
 
+  // Check if this is a Write to plan.md
+  const input = toolCall.input as Record<string, unknown> | null;
+  const writePath = input?.path ?? input?.file_path;
+  const isPlanWrite =
+    toolCall.name === 'Write' &&
+    typeof writePath === 'string' &&
+    writePath.endsWith('plan.md');
+
+  const planContent = isPlanWrite && input?.content
+    ? String(input.content)
+    : null;
+
+  // Show plan inline if it's a plan write with content
+  if (isPlanWrite && planContent && hasResult && !isError) {
+    return (
+      <div className="plan-display">
+        <div className="plan-header">Plan</div>
+        <div className="plan-content">
+          <SimpleMarkdown content={planContent} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`tool-call ${hasResult ? (isError ? 'error' : 'success') : 'pending'}`}>
       <button
@@ -105,4 +129,76 @@ function ToolCallDisplay({ toolCall }: { toolCall: ToolCall }) {
       )}
     </div>
   );
+}
+
+/**
+ * Simple markdown renderer for plan display
+ */
+function SimpleMarkdown({ content }: { content: string }) {
+  const lines = content.split('\n');
+  const elements: React.ReactElement[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+  let codeLanguage = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Code block start/end
+    if (line.startsWith('```')) {
+      if (inCodeBlock) {
+        elements.push(
+          <pre key={i} className="md-code-block" data-lang={codeLanguage}>
+            <code>{codeLines.join('\n')}</code>
+          </pre>
+        );
+        codeLines = [];
+        codeLanguage = '';
+        inCodeBlock = false;
+      } else {
+        inCodeBlock = true;
+        codeLanguage = line.slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    // Headers
+    if (line.startsWith('# ')) {
+      elements.push(<h1 key={i} className="md-h1">{line.slice(2)}</h1>);
+    } else if (line.startsWith('## ')) {
+      elements.push(<h2 key={i} className="md-h2">{line.slice(3)}</h2>);
+    } else if (line.startsWith('### ')) {
+      elements.push(<h3 key={i} className="md-h3">{line.slice(4)}</h3>);
+    }
+    // Checkbox list items
+    else if (line.match(/^- \[[ x]\] /)) {
+      const checked = line[3] === 'x';
+      const text = line.slice(6);
+      elements.push(
+        <div key={i} className="md-checkbox">
+          <input type="checkbox" checked={checked} readOnly />
+          <span>{text}</span>
+        </div>
+      );
+    }
+    // Regular list items
+    else if (line.startsWith('- ')) {
+      elements.push(<li key={i} className="md-li">{line.slice(2)}</li>);
+    }
+    // Empty lines
+    else if (line.trim() === '') {
+      elements.push(<div key={i} className="md-spacer" />);
+    }
+    // Regular text
+    else {
+      elements.push(<p key={i} className="md-p">{line}</p>);
+    }
+  }
+
+  return <div className="simple-markdown">{elements}</div>;
 }

@@ -10,15 +10,17 @@ export default defineConfig({
       'storage',
       'activeTab',
       'scripting',
+      'downloads',
       // Chrome: userScripts is install-time permission
       // Firefox: userScripts must be in optional_permissions
       ...(browser === 'chrome' ? ['sidePanel', 'userScripts'] : []),
     ],
-    // Firefox MV3: userScripts must be optional and requested at runtime
+    // Firefox MV3: userScripts must be in optional_permissions
     ...(browser === 'firefox' && {
       optional_permissions: ['userScripts'],
     }),
-    host_permissions: ['<all_urls>'],
+    // file:///* only works on Chrome (Firefox blocks it - CVE-2020-6809)
+    host_permissions: ['<all_urls>', ...(browser === 'chrome' ? ['file:///*'] : [])],
     // Firefox: use sidebar_action for sidebar panel
     ...(browser === 'firefox' && {
       sidebar_action: {

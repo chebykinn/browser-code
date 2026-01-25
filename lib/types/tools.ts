@@ -56,6 +56,8 @@ export type LsInput = z.infer<typeof LsInputSchema>;
 export type ScreenshotInput = z.infer<typeof ScreenshotInputSchema>;
 
 // Tool result types - VFS-based
+export type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+
 export interface ReadResult {
   success: boolean;
   path: string;
@@ -63,6 +65,11 @@ export interface ReadResult {
   version?: number;
   lines?: number;
   error?: string;
+  // Image data for screenshots
+  image?: {
+    data: string;       // base64 data (without data URL prefix)
+    mediaType: ImageMediaType;  // 'image/png' or 'image/jpeg'
+  };
 }
 
 export interface EditResult {

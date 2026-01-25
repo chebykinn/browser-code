@@ -108,8 +108,8 @@ export class VirtualFS {
       normalizedPath = `/${this.domain}${this.urlPath}/${normalizedPath}`;
     }
 
-    // Parse: /{domain}/{url-path}/[page.html|console.log|screenshot.png|scripts/name.js|styles/name.css]
-    const match = normalizedPath.match(/^\/([^\/]+)(\/[^\/]*)*\/(page\.html|console\.log|screenshot\.png|scripts\/([^\/]+\.js)|styles\/([^\/]+\.css))$/);
+    // Parse: /{domain}/{url-path}/[page.html|console.log|screenshot.png|plan.md|scripts/name.js|styles/name.css]
+    const match = normalizedPath.match(/^\/([^\/]+)(\/[^\/]*)*\/(page\.html|console\.log|screenshot\.png|plan\.md|scripts\/([^\/]+\.js)|styles\/([^\/]+\.css))$/);
 
     if (!match) {
       // Check if it's a directory path
@@ -127,7 +127,7 @@ export class VirtualFS {
     }
 
     const domain = match[1];
-    const urlPathParts = normalizedPath.replace(`/${domain}`, '').replace(/\/(page\.html|console\.log|screenshot\.png|scripts\/.*|styles\/.*)$/, '');
+    const urlPathParts = normalizedPath.replace(`/${domain}`, '').replace(/\/(page\.html|console\.log|screenshot\.png|plan\.md|scripts\/.*|styles\/.*)$/, '');
     const urlPath = urlPathParts || '/';
 
     let fileType: FileType = 'page';
@@ -142,6 +142,9 @@ export class VirtualFS {
     } else if (match[3] === 'screenshot.png') {
       fileType = 'screenshot';
       fileName = 'screenshot.png';
+    } else if (match[3] === 'plan.md') {
+      fileType = 'plan';
+      fileName = 'plan.md';
     } else if (match[4]) {
       fileType = 'script';
       fileName = match[4];
@@ -243,6 +246,35 @@ export class VirtualFS {
       };
     }
 
+    if (parsed.fileType === 'plan') {
+      // Plan is stored in memory (session-specific)
+      const plan = this.storage.getPlan(parsed.urlPath);
+      if (!plan) {
+        return {
+          code: 'NOT_FOUND',
+          message: 'No plan.md file exists yet.',
+          path,
+        };
+      }
+
+      let content = plan.content;
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset || 0;
+        const end = limit ? start + limit : undefined;
+        content = lines.slice(start, end).join('\n');
+      }
+
+      return {
+        content,
+        version: plan.version,
+        lines: totalLines,
+        path: parsed.fullPath,
+      };
+    }
+
     // Read from storage
     const readResult = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
     if (!readResult.file) {
@@ -299,6 +331,21 @@ export class VirtualFS {
 
     if (parsed.fileType === 'page') {
       return this.pageSync.write(content, expectedVersion);
+    }
+
+    if (parsed.fileType === 'plan') {
+      // Plan is stored in memory (session-specific)
+      const result = this.storage.savePlan(parsed.urlPath, content, expectedVersion);
+      if ('code' in result) {
+        return {
+          code: result.code as 'VERSION_MISMATCH',
+          message: result.message,
+          path,
+          expectedVersion,
+          actualVersion: this.storage.getPlan(parsed.urlPath)?.version,
+        };
+      }
+      return result;
     }
 
     // Write to storage
@@ -459,6 +506,18 @@ export class VirtualFS {
         path: `${targetPath}/screenshot.png`,
         type: 'file',
         version: screenshot.version,
+      });
+    }
+
+    // Show plan.md if it exists
+    const plan = this.storage.getPlan(this.urlPath);
+    if (plan) {
+      entries.push({
+        name: 'plan.md',
+        path: `${targetPath}/plan.md`,
+        type: 'file',
+        version: plan.version,
+        modified: plan.modified,
       });
     }
 

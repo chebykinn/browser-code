@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { DOM_TOOLS, SYSTEM_PROMPT } from './tools';
-import type { Message, AssistantContent, ToolResultContent } from '@/lib/types/messages';
+import { SYSTEM_PROMPT } from './tools';
+import { PLAN_MODE_TOOLS, EXECUTE_MODE_TOOLS, PLAN_MODE_SYSTEM_PROMPT } from './plan-tools';
+import type { Message, AssistantContent, ToolResultContent, AgentMode, TodoItem, TextContent, ImageContent } from '@/lib/types/messages';
+import type { ReadResult } from '@/lib/types/tools';
 
 const MAX_TURNS = 500;
 
@@ -10,6 +12,7 @@ export interface AgentCallbacks {
   onToolResult: (toolCallId: string, result: unknown) => void;
   onDone: () => void;
   onError: (error: string) => void;
+  onTodosUpdated?: (todos: TodoItem[]) => void;
 }
 
 export interface AgentOptions {
@@ -19,6 +22,8 @@ export interface AgentOptions {
   history: Message[];
   callbacks: AgentCallbacks;
   abortSignal?: AbortSignal;
+  mode?: AgentMode;
+  todos?: TodoItem[];
 }
 
 /**
@@ -29,9 +34,26 @@ export async function runAgent(
   userMessage: string,
   options: AgentOptions
 ): Promise<void> {
-  const { apiKey, model = 'claude-opus-4-5-20251101', tabId, history, callbacks, abortSignal } = options;
+  const {
+    apiKey,
+    model = 'claude-opus-4-5-20251101',
+    tabId,
+    history,
+    callbacks,
+    abortSignal,
+    mode = 'plan',
+    todos = [],
+  } = options;
+
+  // Select tools and system prompt based on mode
+  const tools = mode === 'plan' ? PLAN_MODE_TOOLS : EXECUTE_MODE_TOOLS;
+  const systemPrompt = mode === 'plan' ? PLAN_MODE_SYSTEM_PROMPT : SYSTEM_PROMPT;
+
+  // Track todos locally (will be updated by TodoWrite tool)
+  let currentTodos = [...todos];
 
   console.log('[Page Editor] Starting agent with model:', model);
+  console.log('[Page Editor] Mode:', mode);
   console.log('[Page Editor] User message:', userMessage);
   console.log('[Page Editor] Tab ID:', tabId);
   console.log('[Page Editor] History length:', history.length);
@@ -66,8 +88,8 @@ export async function runAgent(
         {
           model,
           max_tokens: 16384,
-          system: SYSTEM_PROMPT,
-          tools: DOM_TOOLS,
+          system: systemPrompt,
+          tools: tools,
           messages: messages.map((m) => ({
             role: m.role,
             content: m.content,
@@ -119,33 +141,73 @@ export async function runAgent(
         callbacks.onToolCall(call.name, call.input, call.id);
 
         try {
-          // Send tool execution request to content script
-          console.log('[Page Editor] Sending to content script, tabId:', tabId);
-          const response = await sendToContentScript(tabId, {
-            type: 'EXECUTE_TOOL',
-            tool: call.name,
-            input: call.input,
-            toolCallId: call.id,
-          });
+          let toolResult: unknown;
 
-          console.log('[Page Editor] Tool response:', response);
-          const resultStr = JSON.stringify(response.result, null, 2);
-          callbacks.onToolResult(call.id, response.result);
-
-          // Truncate large tool results to avoid token limit
-          const MAX_RESULT_LENGTH = 15000;
-          let truncatedResult = resultStr;
-          if (resultStr.length > MAX_RESULT_LENGTH) {
-            truncatedResult = resultStr.slice(0, MAX_RESULT_LENGTH) +
-              `\n\n[TRUNCATED - Result was ${resultStr.length} chars. Use more specific queries or offset/limit params.]`;
-            console.log('[Page Editor] Tool result truncated from', resultStr.length, 'to', MAX_RESULT_LENGTH);
+          // Handle TodoRead and TodoWrite in the background
+          if (call.name === 'TodoRead') {
+            toolResult = { todos: currentTodos };
+            console.log('[Page Editor] TodoRead result:', toolResult);
+          } else if (call.name === 'TodoWrite') {
+            const input = call.input as { todos: TodoItem[] };
+            currentTodos = input.todos || [];
+            toolResult = { success: true, count: currentTodos.length };
+            console.log('[Page Editor] TodoWrite updated todos:', currentTodos.length);
+            // Notify about todos update
+            callbacks.onTodosUpdated?.(currentTodos);
+          } else {
+            // Send tool execution request to content script
+            console.log('[Page Editor] Sending to content script, tabId:', tabId);
+            const response = await sendToContentScript(tabId, {
+              type: 'EXECUTE_TOOL',
+              tool: call.name,
+              input: call.input,
+              toolCallId: call.id,
+            });
+            toolResult = response.result;
           }
 
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: truncatedResult,
-          });
+          console.log('[Page Editor] Tool response:', toolResult);
+          callbacks.onToolResult(call.id, toolResult);
+
+          // Check if this is a Read result with image data
+          const readResult = toolResult as ReadResult;
+          if (readResult.image) {
+            console.log('[Page Editor] Image result detected, formatting as image content block');
+            // Format as image content block for Claude
+            const textPart: TextContent = {
+              type: 'text',
+              text: JSON.stringify({ success: true, path: readResult.path, version: readResult.version }),
+            };
+            const imagePart: ImageContent = {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: readResult.image.mediaType,
+                data: readResult.image.data,
+              },
+            };
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: call.id,
+              content: [textPart, imagePart],
+            });
+          } else {
+            // Regular text result - truncate if too large
+            const resultStr = JSON.stringify(toolResult, null, 2);
+            const MAX_RESULT_LENGTH = 15000;
+            let truncatedResult = resultStr;
+            if (resultStr.length > MAX_RESULT_LENGTH) {
+              truncatedResult = resultStr.slice(0, MAX_RESULT_LENGTH) +
+                `\n\n[TRUNCATED - Result was ${resultStr.length} chars. Use more specific queries or offset/limit params.]`;
+              console.log('[Page Editor] Tool result truncated from', resultStr.length, 'to', MAX_RESULT_LENGTH);
+            }
+
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: call.id,
+              content: truncatedResult,
+            });
+          }
         } catch (error) {
           console.error('[Page Editor] Tool execution error:', error);
           const errorStr =

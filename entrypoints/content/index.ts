@@ -73,6 +73,15 @@ async function handleMessage(message: BackgroundToContentMessage): Promise<unkno
       return { success: true };
     }
 
+    case 'VFS_READ': {
+      const path = (message as { path: string }).path;
+      const result = await vfs.read(path);
+      if ('code' in result) {
+        return { error: result.message, code: result.code };
+      }
+      return { content: result.content, version: result.version };
+    }
+
     default:
       throw new Error(`Unknown message type: ${(message as { type: string }).type}`);
   }

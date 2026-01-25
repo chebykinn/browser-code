@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import type { VfsExportData } from '@/lib/types/messages';
 import { CopyDialog, type CopyTarget } from './CopyDialog';
+import { getSyncManager } from '../sync';
+import * as firefoxWriter from '../sync/file-writer-firefox';
+import { parseRoutePattern, matchRoute } from '../../content/vfs/route-matcher';
 
 /**
  * Normalize a URL path by removing trailing slashes (except for root "/")
@@ -50,6 +53,7 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   // Track which file has copy dialog open: "domain|urlPath|type|name"
   const [copyDialogFile, setCopyDialogFile] = useState<string | null>(null);
@@ -227,17 +231,46 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
         return;
       }
 
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `page-editor-scripts-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const syncManager = getSyncManager();
+      const hasDirectWrite = syncManager.hasDirectWrite();
+      const config = syncManager.getConfig();
 
-      alert(`Exported scripts from ${domainCount} domain(s)`);
+      // If Chrome with directory handle, write individual files
+      if (hasDirectWrite && config?.directoryHandle) {
+        await syncManager.exportAll();
+        alert(`Exported scripts from ${domainCount} domain(s) to sync folder`);
+      } else if (firefoxWriter.isAvailable()) {
+        // Firefox: export individual files to Downloads/browser-code-fs/
+        const files: Array<{ domain: string; urlPath: string; type: 'scripts' | 'styles'; name: string; content: string }> = [];
+        for (const [domain, domainData] of Object.entries(data.domains)) {
+          for (const [urlPath, pathData] of Object.entries(domainData.paths)) {
+            if (pathData.scripts) {
+              for (const [name, fileData] of Object.entries(pathData.scripts)) {
+                files.push({ domain, urlPath, type: 'scripts', name, content: fileData.content });
+              }
+            }
+            if (pathData.styles) {
+              for (const [name, fileData] of Object.entries(pathData.styles)) {
+                files.push({ domain, urlPath, type: 'styles', name, content: fileData.content });
+              }
+            }
+          }
+        }
+        await firefoxWriter.exportFiles(files);
+        alert(`Exported ${files.length} file(s) from ${domainCount} domain(s) to Downloads/browser-code-fs/`);
+      } else {
+        // Fallback: old blob download method
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `page-editor-scripts-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert(`Exported scripts from ${domainCount} domain(s)`);
+      }
     } catch (e) {
       alert('Export failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
     }
@@ -271,6 +304,9 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
         return;
       }
 
+      // Cleanup duplicate paths after import
+      await browser.runtime.sendMessage({ type: 'CLEANUP_VFS_PATHS' });
+
       const domains = response.domainNames?.join(', ') || 'unknown';
       alert(`Imported ${response.importedFiles} file(s) for: ${domains}\n\nNote: Files only show when viewing the matching domain.`);
 
@@ -284,24 +320,145 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
     }
   };
 
+  const handleImportFolderClick = () => {
+    folderInputRef.current?.click();
+  };
+
+  const handleImportFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    try {
+      // Parse directory structure: {domain}/{urlPath}/scripts|styles/{filename}
+      const vfsData: VfsExportData = {
+        version: 1,
+        exportedAt: Date.now(),
+        domains: {},
+      };
+
+      for (const file of Array.from(files)) {
+        // webkitRelativePath gives us the full path from selected folder
+        const relativePath = file.webkitRelativePath;
+        if (!relativePath) continue;
+
+        // Only process .js and .css files
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (ext !== 'js' && ext !== 'css') continue;
+
+        // Parse path: folder/domain/urlPath.../scripts|styles/filename
+        const parts = relativePath.split('/');
+        if (parts.length < 4) continue; // Need at least: folder/domain/type/file
+
+        // Skip the root folder name (first part)
+        const pathParts = parts.slice(1);
+
+        // Find scripts or styles in path
+        const typeIndex = pathParts.findIndex(p => p === 'scripts' || p === 'styles');
+        if (typeIndex === -1 || typeIndex === 0) continue;
+
+        const domain = pathParts[0];
+        // Normalize urlPath: handle empty path as '/', remove trailing slashes
+        const rawUrlPath = '/' + pathParts.slice(1, typeIndex).join('/');
+        const urlPath = normalizePath(rawUrlPath);
+        const fileType = pathParts[typeIndex] as 'scripts' | 'styles';
+        const fileName = pathParts.slice(typeIndex + 1).join('/');
+
+        // Read file content
+        const content = await file.text();
+
+        // Add to VFS data structure
+        if (!vfsData.domains[domain]) {
+          vfsData.domains[domain] = { paths: {} };
+        }
+        if (!vfsData.domains[domain].paths[urlPath]) {
+          vfsData.domains[domain].paths[urlPath] = { scripts: {}, styles: {} };
+        }
+
+        vfsData.domains[domain].paths[urlPath][fileType][fileName] = {
+          content,
+          version: 1,
+          created: file.lastModified,
+          modified: file.lastModified,
+        };
+      }
+
+      const domainCount = Object.keys(vfsData.domains).length;
+      if (domainCount === 0) {
+        alert('No valid files found in folder.\n\nExpected structure:\nfolder/{domain}/{path}/scripts/*.js\nfolder/{domain}/{path}/styles/*.css');
+        return;
+      }
+
+      // Import using existing mechanism
+      const response = await browser.runtime.sendMessage({
+        type: 'IMPORT_ALL_SCRIPTS',
+        data: vfsData,
+        tabId,
+      });
+
+      if (!response.success) {
+        alert('Import failed: ' + response.error);
+        return;
+      }
+
+      // Cleanup duplicate paths after import
+      await browser.runtime.sendMessage({ type: 'CLEANUP_VFS_PATHS' });
+
+      const domains = response.domainNames?.join(', ') || 'unknown';
+      alert(`Imported ${response.importedFiles} file(s) for: ${domains}\n\nNote: Files only show when viewing the matching domain.`);
+
+      await loadFiles();
+    } catch (e) {
+      alert('Import failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+    }
+  };
+
   // Check if a domain/path is the current page (or a pattern that matched the current page)
   const isCurrentPage = (domain: string, urlPath: string) => {
     if (domain !== currentDomain) return false;
     const normalizedUrlPath = normalizePath(urlPath);
+
+    // Exact match
     if (normalizedUrlPath === currentPath) return true;
-    // Also consider as "current page" if files were matched from this pattern
-    if (scriptsMatchedPattern && normalizedUrlPath === normalizePath(scriptsMatchedPattern)) return true;
-    if (stylesMatchedPattern && normalizedUrlPath === normalizePath(stylesMatchedPattern)) return true;
+
+    // Check if urlPath is a pattern that matches currentPath
+    // e.g., urlPath="/products/[id]", currentPath="/products/123"
+    const routePattern = parseRoutePattern(normalizedUrlPath);
+    const matchResult = matchRoute(currentPath, routePattern);
+    if (matchResult) return true;
+
     return false;
   };
 
-  // Get other domains/paths (not current)
-  const otherDomains = Object.entries(allFiles).filter(([domain, data]) => {
-    // Check if this domain has any paths that are not the current page
-    return Object.keys(data.paths).some(
-      (urlPath) => !isCurrentPage(domain, urlPath)
+  // Check if a file is currently loaded (injected into the page)
+  const isFileLoaded = (domain: string, urlPath: string, type: 'script' | 'style', fileName: string) => {
+    if (domain !== currentDomain) return false;
+    const files = type === 'script' ? currentScripts : currentStyles;
+    return files.some(f => f.name === fileName);
+  };
+
+  // Auto-expand matching paths on load
+  useEffect(() => {
+    if (!currentDomain || !allFiles[currentDomain]) return;
+
+    const matchingPaths = Object.keys(allFiles[currentDomain].paths).filter(urlPath =>
+      isCurrentPage(currentDomain, urlPath)
     );
-  });
+
+    if (matchingPaths.length > 0) {
+      setExpandedSections(prev => {
+        const next = new Set(prev);
+        matchingPaths.forEach(urlPath => next.add(`${currentDomain}${urlPath}`));
+        return next;
+      });
+    }
+  }, [currentDomain, allFiles, currentPath]);
+
+  // Check if domain has any files
+  const hasFiles = Object.keys(allFiles).length > 0;
 
   return (
     <div className="panel scripts-panel">
@@ -319,129 +476,26 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
           <p className="error-text">Error: {error}</p>
         ) : (
           <>
-            {/* Current Page Section */}
-            <div className="file-section current-page-section">
-              <h3>Current Page</h3>
+            {/* Current page info */}
+            <div className="current-page-info-section">
               <p className="current-page-info">{currentDomain}{currentPath}</p>
-              {(scriptsMatchedPattern || stylesMatchedPattern) && (
-                <p className="matched-pattern-info">
-                  Matched from: <code>{scriptsMatchedPattern || stylesMatchedPattern}</code>
-                </p>
-              )}
-
-              {currentScripts.length === 0 && currentStyles.length === 0 ? (
-                <p className="empty-text small">No saved files for this page</p>
-              ) : (
-                <>
-                  {currentScripts.length > 0 && (
-                    <div className="file-group">
-                      <h4>Scripts ({currentScripts.length})</h4>
-                      <ul className="files-list">
-                        {currentScripts.map((file) => {
-                          const fileKey = `${currentDomain}|${currentPath}|script|${file.name}`;
-                          const showDialog = copyDialogFile === fileKey;
-                          return (
-                            <li key={file.name} className="file-item">
-                              <div className="file-info">
-                                <strong className="file-name">{file.name}</strong>
-                                <span className="file-meta">
-                                  v{file.version} • {formatDate(file.modified)}
-                                </span>
-                              </div>
-                              <div className="file-actions">
-                                <div className="copy-button-wrapper">
-                                  <button
-                                    className="file-button copy"
-                                    onClick={() => openCopyDialog(currentDomain, currentPath, 'script', file.name)}
-                                  >
-                                    Copy to...
-                                  </button>
-                                  {showDialog && (
-                                    <CopyDialog
-                                      currentPath={currentPath}
-                                      onCopy={(target) => handleCopy(currentDomain, currentPath, 'script', file.name, target)}
-                                      onCancel={closeCopyDialog}
-                                    />
-                                  )}
-                                </div>
-                                <button
-                                  className="file-button delete"
-                                  onClick={() => handleDelete('script', file.name)}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  )}
-
-                  {currentStyles.length > 0 && (
-                    <div className="file-group">
-                      <h4>Styles ({currentStyles.length})</h4>
-                      <ul className="files-list">
-                        {currentStyles.map((file) => {
-                          const fileKey = `${currentDomain}|${currentPath}|style|${file.name}`;
-                          const showDialog = copyDialogFile === fileKey;
-                          return (
-                            <li key={file.name} className="file-item">
-                              <div className="file-info">
-                                <strong className="file-name">{file.name}</strong>
-                                <span className="file-meta">
-                                  v{file.version} • {formatDate(file.modified)}
-                                </span>
-                              </div>
-                              <div className="file-actions">
-                                <div className="copy-button-wrapper">
-                                  <button
-                                    className="file-button copy"
-                                    onClick={() => openCopyDialog(currentDomain, currentPath, 'style', file.name)}
-                                  >
-                                    Copy to...
-                                  </button>
-                                  {showDialog && (
-                                    <CopyDialog
-                                      currentPath={currentPath}
-                                      onCopy={(target) => handleCopy(currentDomain, currentPath, 'style', file.name, target)}
-                                      onCancel={closeCopyDialog}
-                                    />
-                                  )}
-                                </div>
-                                <button
-                                  className="file-button delete"
-                                  onClick={() => handleDelete('style', file.name)}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  )}
-                </>
-              )}
             </div>
 
-            {/* Other Domains Section */}
-            {otherDomains.length > 0 && (
-              <div className="file-section other-domains-section">
-                <h3>Other Saved Files</h3>
-
-                {otherDomains.map(([domain, data]) => (
+            {/* Unified file tree */}
+            {!hasFiles ? (
+              <p className="empty-text">No saved files</p>
+            ) : (
+              <div className="file-section file-tree-section">
+                {Object.entries(allFiles).map(([domain, data]) => (
                   <div key={domain} className="domain-group">
                     {Object.entries(data.paths).map(([urlPath, files]) => {
-                      if (isCurrentPage(domain, urlPath)) return null;
-
                       const sectionKey = `${domain}${urlPath}`;
                       const isExpanded = expandedSections.has(sectionKey);
+                      const isMatching = isCurrentPage(domain, urlPath);
                       const totalFiles = files.scripts.length + files.styles.length;
 
                       return (
-                        <div key={sectionKey} className="collapsible-section">
+                        <div key={sectionKey} className={`collapsible-section ${isMatching ? 'matching' : ''}`}>
                           <button
                             className="collapsible-header"
                             onClick={() => toggleSection(sectionKey)}
@@ -451,6 +505,7 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                               {domain}{urlPath}
                             </span>
                             <span className="section-count">{totalFiles} file(s)</span>
+                            {isMatching && <span className="matching-indicator" title="Matches current page">●</span>}
                           </button>
 
                           {isExpanded && (
@@ -462,10 +517,14 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                     {files.scripts.map((file) => {
                                       const fileKey = `${domain}|${urlPath}|script|${file.name}`;
                                       const showDialog = copyDialogFile === fileKey;
+                                      const loaded = isFileLoaded(domain, urlPath, 'script', file.name);
                                       return (
-                                        <li key={file.name} className="file-item">
+                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''}`}>
                                           <div className="file-info">
-                                            <strong className="file-name">{file.name}</strong>
+                                            <strong className="file-name">
+                                              {loaded && <span className="loaded-indicator" title="Loaded">✓</span>}
+                                              {file.name}
+                                            </strong>
                                             <span className="file-meta">
                                               v{file.version} • {formatDate(file.modified)}
                                             </span>
@@ -507,10 +566,14 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                     {files.styles.map((file) => {
                                       const fileKey = `${domain}|${urlPath}|style|${file.name}`;
                                       const showDialog = copyDialogFile === fileKey;
+                                      const loaded = isFileLoaded(domain, urlPath, 'style', file.name);
                                       return (
-                                        <li key={file.name} className="file-item">
+                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''}`}>
                                           <div className="file-info">
-                                            <strong className="file-name">{file.name}</strong>
+                                            <strong className="file-name">
+                                              {loaded && <span className="loaded-indicator" title="Loaded">✓</span>}
+                                              {file.name}
+                                            </strong>
                                             <span className="file-meta">
                                               v{file.version} • {formatDate(file.modified)}
                                             </span>
@@ -565,13 +628,24 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
             Export All
           </button>
           <button className="import-button" onClick={handleImportClick}>
-            Import
+            Import JSON
+          </button>
+          <button className="import-button" onClick={handleImportFolderClick}>
+            Import Folder
           </button>
           <input
             type="file"
             ref={fileInputRef}
             onChange={handleImportFile}
             accept=".json"
+            style={{ display: 'none' }}
+          />
+          <input
+            type="file"
+            ref={folderInputRef}
+            onChange={handleImportFolder}
+            // @ts-expect-error webkitdirectory is not in types but works in browsers
+            webkitdirectory=""
             style={{ display: 'none' }}
           />
         </div>

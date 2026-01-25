@@ -1,4 +1,13 @@
-import type { ToolResult } from './tools';
+import type { ToolResult, ImageMediaType } from './tools';
+
+// Agent mode types
+export type AgentMode = 'plan' | 'execute';
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
 
 // Messages from sidebar to background
 export interface ChatMessage {
@@ -161,6 +170,17 @@ export interface AgentErrorMessage {
   error: string;
 }
 
+// Plan mode messages (background to sidebar)
+export interface ModeChangedMessage {
+  type: 'MODE_CHANGED';
+  mode: AgentMode;
+}
+
+export interface TodosUpdatedMessage {
+  type: 'TODOS_UPDATED';
+  todos: TodoItem[];
+}
+
 // Message from content script to background to execute script in main world
 export interface ExecuteInMainWorldMessage {
   type: 'EXECUTE_IN_MAIN_WORLD';
@@ -177,6 +197,44 @@ export interface CaptureScreenshotMessage {
 // Message to check if userScripts API is available
 export interface HasUserScriptsMessage {
   type: 'HAS_USER_SCRIPTS';
+}
+
+export interface SyncLocalToVfsMessage {
+  type: 'SYNC_LOCAL_TO_VFS';
+  data: {
+    domain: string;
+    urlPath: string;
+    fileType: 'scripts' | 'styles';
+    fileName: string;
+    content: string;
+  };
+}
+
+export interface CleanupVfsPathsMessage {
+  type: 'CLEANUP_VFS_PATHS';
+}
+
+// Plan mode messages (sidebar to background)
+export interface SetModeMessage {
+  type: 'SET_MODE';
+  tabId: number;
+  mode: AgentMode;
+}
+
+export interface GetModeMessage {
+  type: 'GET_MODE';
+  tabId: number;
+}
+
+export interface ApprovePlanMessage {
+  type: 'APPROVE_PLAN';
+  tabId: number;
+}
+
+export interface RejectPlanMessage {
+  type: 'REJECT_PLAN';
+  tabId: number;
+  feedback?: string;
 }
 
 // Union types
@@ -201,7 +259,13 @@ export type SidebarToBackgroundMessage =
   | DeleteVfsFileAnyMessage
   | ExecuteInMainWorldMessage
   | CaptureScreenshotMessage
-  | HasUserScriptsMessage;
+  | HasUserScriptsMessage
+  | SyncLocalToVfsMessage
+  | CleanupVfsPathsMessage
+  | SetModeMessage
+  | GetModeMessage
+  | ApprovePlanMessage
+  | RejectPlanMessage;
 
 export interface GetVfsFilesContentMessage {
   type: 'GET_VFS_FILES';
@@ -217,19 +281,27 @@ export interface InvalidateVfsCacheContentMessage {
   type: 'INVALIDATE_VFS_CACHE';
 }
 
+export interface VfsReadContentMessage {
+  type: 'VFS_READ';
+  path: string;
+}
+
 export type BackgroundToContentMessage =
   | ExecuteToolMessage
   | ApplyEditsMessage
   | GetVfsFilesContentMessage
   | DeleteVfsFileContentMessage
-  | InvalidateVfsCacheContentMessage;
+  | InvalidateVfsCacheContentMessage
+  | VfsReadContentMessage;
 
 export type BackgroundToSidebarMessage =
   | AgentResponseMessage
   | ToolCallMessage
   | ToolResultMessage
   | AgentDoneMessage
-  | AgentErrorMessage;
+  | AgentErrorMessage
+  | ModeChangedMessage
+  | TodosUpdatedMessage;
 
 // Settings
 export interface Settings {
@@ -271,6 +343,15 @@ export interface TextContent {
   text: string;
 }
 
+export interface ImageContent {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: ImageMediaType;
+    data: string;
+  };
+}
+
 export interface ToolUseContent {
   type: 'tool_use';
   id: string;
@@ -281,7 +362,7 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: 'tool_result';
   tool_use_id: string;
-  content: string;
+  content: string | (TextContent | ImageContent)[];
 }
 
 export type AssistantContent = TextContent | ToolUseContent;

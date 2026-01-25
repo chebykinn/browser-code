@@ -7,6 +7,8 @@ import type {
   SavedEdit,
   VfsExportData,
   DomainExportData,
+  AgentMode,
+  TodoItem,
 } from '@/lib/types/messages';
 
 import type { Message } from '@/lib/types/messages';
@@ -25,6 +27,14 @@ interface RoutePatternInfo {
 
 function escapeRegexChars(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Normalize a URL path by removing trailing slashes (except for root "/")
+ */
+function normalizeUrlPath(path: string): string {
+  if (path === '/' || path === '') return '/';
+  return path.replace(/\/+$/, '');
 }
 
 function parseRoutePatternForBackground(pattern: string): RoutePatternInfo {
@@ -133,6 +143,15 @@ const conversationHistory = new Map<number, Message[]>();
 // Store active agent AbortControllers per tabId
 const activeAgents = new Map<number, AbortController>();
 
+// Store agent mode per tab (default: 'plan')
+const tabModes = new Map<number, AgentMode>();
+
+// Store todos per tab
+const tabTodos = new Map<number, TodoItem[]>();
+
+// Track if agent is awaiting plan approval per tab
+const awaitingPlanApproval = new Map<number, boolean>();
+
 export default defineBackground(() => {
   console.log('[Page Editor] Background script loaded');
 
@@ -238,6 +257,10 @@ async function handleMessage(
       }
       const history = conversationHistory.get(tabId)!;
 
+      // Get mode and todos for this tab
+      const mode = tabModes.get(tabId) || 'plan';
+      const todos = tabTodos.get(tabId) || [];
+
       // Run the agent with existing history
       // CRITICAL: Use LIVE port lookup in callbacks so reconnecting sidebar receives messages
       await runAgent(message.content, {
@@ -246,6 +269,8 @@ async function handleMessage(
         tabId,
         history,
         abortSignal: abortController.signal,
+        mode,
+        todos,
         callbacks: {
           onAssistantMessage: (content: AssistantContent[]) => {
             // Live lookup: get current port for this tab (may have reconnected)
@@ -272,9 +297,21 @@ async function handleMessage(
               result: result as never,
             });
           },
+          onTodosUpdated: (updatedTodos: TodoItem[]) => {
+            tabTodos.set(tabId, updatedTodos);
+            const currentPort = sidebarPorts.get(tabId);
+            sendToSidebar(currentPort, {
+              type: 'TODOS_UPDATED',
+              todos: updatedTodos,
+            });
+          },
           onDone: () => {
             activeAgents.delete(tabId);
             const currentPort = sidebarPorts.get(tabId);
+            // In plan mode, mark as awaiting approval
+            if (mode === 'plan') {
+              awaitingPlanApproval.set(tabId, true);
+            }
             sendToSidebar(currentPort, { type: 'AGENT_DONE' });
           },
           onError: (error) => {
@@ -302,7 +339,14 @@ async function handleMessage(
     case 'CLEAR_HISTORY': {
       const tabId = message.tabId;
       conversationHistory.delete(tabId);
+      // Reset to plan mode and clear todos
+      tabModes.set(tabId, 'plan');
+      tabTodos.delete(tabId);
+      awaitingPlanApproval.delete(tabId);
       console.log('[Page Editor] Cleared history for tabId:', tabId);
+      // Notify sidebar of mode reset
+      const currentPort = sidebarPorts.get(tabId);
+      sendToSidebar(currentPort, { type: 'MODE_CHANGED', mode: 'plan' });
       return { success: true };
     }
 
@@ -311,6 +355,180 @@ async function handleMessage(
       const history = conversationHistory.get(tabId) || [];
       console.log('[Page Editor] GET_HISTORY for tabId:', tabId, 'length:', history.length);
       return { history };
+    }
+
+    case 'SET_MODE': {
+      const tabId = message.tabId;
+      const newMode = message.mode;
+      tabModes.set(tabId, newMode);
+      console.log('[Page Editor] SET_MODE for tabId:', tabId, 'mode:', newMode);
+      const currentPort = sidebarPorts.get(tabId);
+      sendToSidebar(currentPort, { type: 'MODE_CHANGED', mode: newMode });
+      return { success: true, mode: newMode };
+    }
+
+    case 'GET_MODE': {
+      const tabId = message.tabId;
+      const mode = tabModes.get(tabId) || 'plan';
+      const todos = tabTodos.get(tabId) || [];
+      const awaiting = awaitingPlanApproval.get(tabId) || false;
+      console.log('[Page Editor] GET_MODE for tabId:', tabId, 'mode:', mode);
+      return { mode, todos, awaitingApproval: awaiting };
+    }
+
+    case 'APPROVE_PLAN': {
+      const tabId = message.tabId;
+      console.log('[Page Editor] APPROVE_PLAN for tabId:', tabId);
+
+      // Clear awaiting state
+      awaitingPlanApproval.delete(tabId);
+
+      // Switch to execute mode
+      tabModes.set(tabId, 'execute');
+
+      // Notify sidebar of mode change
+      const currentPort = sidebarPorts.get(tabId);
+      sendToSidebar(currentPort, { type: 'MODE_CHANGED', mode: 'execute' });
+
+      // Clear history for fresh execution
+      conversationHistory.delete(tabId);
+
+      // Fetch the plan.md content from the content script
+      let planContent = '';
+      try {
+        const planResponse = await browser.tabs.sendMessage(tabId, {
+          type: 'VFS_READ',
+          path: './plan.md',
+        }) as { content?: string; code?: string };
+        if (planResponse.content) {
+          planContent = planResponse.content;
+        }
+      } catch (err) {
+        console.log('[Page Editor] Could not read plan.md:', err);
+      }
+
+      // Get the plan content to use as context for execution
+      // Include both the plan and todos
+      const todos = tabTodos.get(tabId) || [];
+      let planContext = 'Execute the approved plan.\n\n';
+      if (planContent) {
+        planContext += `## Plan\n${planContent}\n\n`;
+      }
+      if (todos.length > 0) {
+        planContext += `## Tasks\n${todos.map(t => `- [${t.status === 'completed' ? 'x' : ' '}] ${t.content}`).join('\n')}\n\n`;
+      }
+      planContext += 'Proceed with the first pending task.';
+
+      // Start execution
+      const settings = await getSettings();
+      if (settings.apiKey) {
+        const abortController = new AbortController();
+        activeAgents.set(tabId, abortController);
+
+        runAgent(planContext, {
+          apiKey: settings.apiKey,
+          model: settings.model,
+          tabId,
+          history: [],
+          abortSignal: abortController.signal,
+          mode: 'execute',
+          todos,
+          callbacks: {
+            onAssistantMessage: (content: AssistantContent[]) => {
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'AGENT_RESPONSE', content });
+            },
+            onToolCall: (toolName, input, toolCallId) => {
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'TOOL_CALL', toolName, input, toolCallId });
+            },
+            onToolResult: (toolCallId, result) => {
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'TOOL_RESULT', toolCallId, result: result as never });
+            },
+            onTodosUpdated: (updatedTodos: TodoItem[]) => {
+              tabTodos.set(tabId, updatedTodos);
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'TODOS_UPDATED', todos: updatedTodos });
+            },
+            onDone: () => {
+              activeAgents.delete(tabId);
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'AGENT_DONE' });
+            },
+            onError: (error) => {
+              activeAgents.delete(tabId);
+              const port = sidebarPorts.get(tabId);
+              sendToSidebar(port, { type: 'AGENT_ERROR', error });
+            },
+          },
+        });
+      }
+
+      return { success: true };
+    }
+
+    case 'REJECT_PLAN': {
+      const tabId = message.tabId;
+      const feedback = message.feedback;
+      console.log('[Page Editor] REJECT_PLAN for tabId:', tabId, 'feedback:', feedback);
+
+      // Clear awaiting state but stay in plan mode
+      awaitingPlanApproval.delete(tabId);
+
+      // If feedback provided, send it as a new message to revise the plan
+      if (feedback) {
+        const settings = await getSettings();
+        if (settings.apiKey) {
+          const history = conversationHistory.get(tabId) || [];
+          const abortController = new AbortController();
+          activeAgents.set(tabId, abortController);
+
+          const todos = tabTodos.get(tabId) || [];
+
+          runAgent(`Please revise the plan based on this feedback: ${feedback}`, {
+            apiKey: settings.apiKey,
+            model: settings.model,
+            tabId,
+            history,
+            abortSignal: abortController.signal,
+            mode: 'plan',
+            todos,
+            callbacks: {
+              onAssistantMessage: (content: AssistantContent[]) => {
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'AGENT_RESPONSE', content });
+              },
+              onToolCall: (toolName, input, toolCallId) => {
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'TOOL_CALL', toolName, input, toolCallId });
+              },
+              onToolResult: (toolCallId, result) => {
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'TOOL_RESULT', toolCallId, result: result as never });
+              },
+              onTodosUpdated: (updatedTodos: TodoItem[]) => {
+                tabTodos.set(tabId, updatedTodos);
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'TODOS_UPDATED', todos: updatedTodos });
+              },
+              onDone: () => {
+                activeAgents.delete(tabId);
+                awaitingPlanApproval.set(tabId, true);
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'AGENT_DONE' });
+              },
+              onError: (error) => {
+                activeAgents.delete(tabId);
+                const port = sidebarPorts.get(tabId);
+                sendToSidebar(port, { type: 'AGENT_ERROR', error });
+              },
+            },
+          });
+        }
+      }
+
+      return { success: true };
     }
 
     case 'GET_VFS_FILES': {
@@ -395,7 +613,10 @@ async function handleMessage(
           const existingData = (existing[storageKey] as DomainExportData) || { paths: {} };
 
           // Merge paths
-          for (const [urlPath, pathData] of Object.entries(domainData.paths)) {
+          for (const [rawUrlPath, pathData] of Object.entries(domainData.paths)) {
+            // Normalize path to avoid duplicates with/without trailing slash
+            const urlPath = normalizeUrlPath(rawUrlPath);
+
             if (!existingData.paths[urlPath]) {
               existingData.paths[urlPath] = { scripts: {}, styles: {}, editRecords: [] };
             }
@@ -471,6 +692,68 @@ async function handleMessage(
         return { success: true, files: allFiles };
       } catch (error) {
         console.error('[Page Editor] GET_ALL_VFS_FILES error:', error);
+        return { success: false, error: String(error) };
+      }
+    }
+
+    case 'CLEANUP_VFS_PATHS': {
+      // Merge duplicate paths (e.g., '/path' and '/path/' -> '/path')
+      try {
+        const allStorage = await browser.storage.local.get(null);
+        let totalMerged = 0;
+
+        for (const [key, value] of Object.entries(allStorage)) {
+          if (!key.startsWith('vfs:')) continue;
+
+          const domainData = value as DomainExportData;
+          if (!domainData?.paths) continue;
+
+          const normalizedPaths: Record<string, typeof domainData.paths[string]> = {};
+          let hasDuplicates = false;
+
+          for (const [rawPath, pathData] of Object.entries(domainData.paths)) {
+            const normalizedPath = normalizeUrlPath(rawPath);
+
+            if (normalizedPaths[normalizedPath]) {
+              // Merge into existing
+              hasDuplicates = true;
+              const existing = normalizedPaths[normalizedPath];
+
+              // Merge scripts (newer version wins)
+              for (const [name, file] of Object.entries(pathData.scripts || {})) {
+                const existingFile = existing.scripts[name];
+                if (!existingFile || (file as any).version > existingFile.version) {
+                  existing.scripts[name] = file;
+                }
+              }
+
+              // Merge styles
+              for (const [name, file] of Object.entries(pathData.styles || {})) {
+                const existingFile = existing.styles[name];
+                if (!existingFile || (file as any).version > existingFile.version) {
+                  existing.styles[name] = file;
+                }
+              }
+
+              totalMerged++;
+            } else {
+              normalizedPaths[normalizedPath] = {
+                scripts: { ...pathData.scripts },
+                styles: { ...pathData.styles },
+                editRecords: pathData.editRecords || [],
+              };
+            }
+          }
+
+          if (hasDuplicates) {
+            domainData.paths = normalizedPaths;
+            await browser.storage.local.set({ [key]: domainData });
+          }
+        }
+
+        return { success: true, merged: totalMerged };
+      } catch (error) {
+        console.error('[Page Editor] CLEANUP_VFS_PATHS error:', error);
         return { success: false, error: String(error) };
       }
     }
@@ -595,6 +878,45 @@ async function handleMessage(
       // Check if userScripts API is available
       const available = getUserScriptsAPI() !== undefined;
       return { available };
+    }
+
+    case 'SYNC_LOCAL_TO_VFS': {
+      try {
+        const { domain, urlPath, fileType, fileName, content } = message.data;
+        const storageKey = `vfs:${domain}`;
+
+        const result = await browser.storage.local.get(storageKey);
+        const domainData = (result[storageKey] as DomainExportData) || { paths: {} };
+
+        // Ensure path exists
+        if (!domainData.paths[urlPath]) {
+          domainData.paths[urlPath] = { scripts: {}, styles: {} };
+        }
+
+        const collection = fileType === 'scripts'
+          ? domainData.paths[urlPath].scripts
+          : domainData.paths[urlPath].styles;
+
+        // Get existing version or start at 1
+        const existingFile = collection?.[fileName] as { version?: number } | undefined;
+        const version = (existingFile?.version || 0) + 1;
+
+        // Update file
+        collection[fileName] = {
+          content,
+          version,
+          created: existingFile ? (existingFile as { created?: number }).created || Date.now() : Date.now(),
+          modified: Date.now(),
+        };
+
+        await browser.storage.local.set({ [storageKey]: domainData });
+
+        console.log('[Page Editor] Synced local file to VFS:', fileName, 'at', domain, urlPath);
+        return { success: true, version };
+      } catch (error) {
+        console.error('[Page Editor] SYNC_LOCAL_TO_VFS error:', error);
+        return { success: false, error: String(error) };
+      }
     }
 
     case 'CAPTURE_SCREENSHOT': {
