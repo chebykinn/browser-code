@@ -5,7 +5,7 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: 'Browser Code',
     description: 'Edit web pages with AI assistance - Claude Code for the browser',
-    version: '0.1.0',
+    version: '0.1.1',
     permissions: [
       'storage',
       'activeTab',
