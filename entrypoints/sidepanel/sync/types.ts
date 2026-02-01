@@ -78,3 +78,10 @@ export function detectBrowser(): BrowserType {
 export function hasFileSystemAccess(): boolean {
   return typeof window !== 'undefined' && 'showDirectoryPicker' in window;
 }
+
+// Download result for Firefox Downloads API
+export interface DownloadResult {
+  downloadId: number;
+  success: boolean;
+  error?: string;
+}

@@ -163,36 +163,50 @@ export class VfsWatcher {
 
         const domain = key.replace('vfs:', '');
         const newValue = change.newValue as any;
+        const oldValue = change.oldValue as any;
 
         if (newValue?.paths) {
           for (const [urlPath, pathData] of Object.entries(newValue.paths as Record<string, any>)) {
+            // Get old path data for comparison
+            const oldPathData = oldValue?.paths?.[urlPath] as Record<string, any> | undefined;
+
             // Check scripts
             if (pathData.scripts) {
               for (const [name, file] of Object.entries(pathData.scripts as Record<string, any>)) {
-                vfsChanges.push({
-                  domain,
-                  urlPath,
-                  type: 'scripts',
-                  name,
-                  content: file.content,
-                  version: file.version,
-                  modified: file.modified || Date.now(),
-                });
+                const oldFile = oldPathData?.scripts?.[name] as { version?: number } | undefined;
+
+                // Only report if file is new or version changed
+                if (!oldFile || oldFile.version !== file.version) {
+                  vfsChanges.push({
+                    domain,
+                    urlPath,
+                    type: 'scripts',
+                    name,
+                    content: file.content,
+                    version: file.version,
+                    modified: file.modified || Date.now(),
+                  });
+                }
               }
             }
 
             // Check styles
             if (pathData.styles) {
               for (const [name, file] of Object.entries(pathData.styles as Record<string, any>)) {
-                vfsChanges.push({
-                  domain,
-                  urlPath,
-                  type: 'styles',
-                  name,
-                  content: file.content,
-                  version: file.version,
-                  modified: file.modified || Date.now(),
-                });
+                const oldFile = oldPathData?.styles?.[name] as { version?: number } | undefined;
+
+                // Only report if file is new or version changed
+                if (!oldFile || oldFile.version !== file.version) {
+                  vfsChanges.push({
+                    domain,
+                    urlPath,
+                    type: 'styles',
+                    name,
+                    content: file.content,
+                    version: file.version,
+                    modified: file.modified || Date.now(),
+                  });
+                }
               }
             }
           }

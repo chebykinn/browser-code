@@ -17,12 +17,14 @@ interface VfsFile {
   name: string;
   version: number;
   modified: number;
+  enabled: boolean;
 }
 
 interface FileInfo {
   name: string;
   version: number;
   modified: number;
+  enabled: boolean;
 }
 
 interface AllFilesData {
@@ -195,6 +197,60 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
       await loadFiles();
     } catch (e) {
       alert('Delete failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
+    }
+  };
+
+  const handleToggleEnabled = async (
+    domain: string,
+    urlPath: string,
+    fileType: 'script' | 'style',
+    fileName: string,
+    enabled: boolean
+  ) => {
+    try {
+      const response = await browser.runtime.sendMessage({
+        type: 'TOGGLE_VFS_FILE_ENABLED',
+        domain,
+        urlPath,
+        fileType,
+        fileName,
+        enabled,
+      });
+
+      if (!response.success) {
+        console.error('Toggle failed:', response.error);
+        return;
+      }
+
+      await loadFiles();
+    } catch (e) {
+      console.error('Toggle failed:', e);
+    }
+  };
+
+  const handleSetAllEnabled = async (
+    domain: string,
+    urlPath: string,
+    fileType: 'script' | 'style',
+    enabled: boolean
+  ) => {
+    try {
+      const response = await browser.runtime.sendMessage({
+        type: 'SET_ALL_VFS_FILES_ENABLED',
+        domain,
+        urlPath,
+        fileType,
+        enabled,
+      });
+
+      if (!response.success) {
+        console.error('Set all enabled failed:', response.error);
+        return;
+      }
+
+      await loadFiles();
+    } catch (e) {
+      console.error('Set all enabled failed:', e);
     }
   };
 
@@ -512,14 +568,32 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                             <div className="collapsible-content">
                               {files.scripts.length > 0 && (
                                 <div className="file-group">
-                                  <h4>Scripts</h4>
+                                  <div className="file-group-header">
+                                    <h4>Scripts</h4>
+                                    <div className="bulk-actions">
+                                      <button
+                                        className="bulk-action-button enable"
+                                        onClick={() => handleSetAllEnabled(domain, urlPath, 'script', true)}
+                                        title="Enable all scripts"
+                                      >
+                                        Enable All
+                                      </button>
+                                      <button
+                                        className="bulk-action-button disable"
+                                        onClick={() => handleSetAllEnabled(domain, urlPath, 'script', false)}
+                                        title="Disable all scripts"
+                                      >
+                                        Disable All
+                                      </button>
+                                    </div>
+                                  </div>
                                   <ul className="files-list">
                                     {files.scripts.map((file) => {
                                       const fileKey = `${domain}|${urlPath}|script|${file.name}`;
                                       const showDialog = copyDialogFile === fileKey;
                                       const loaded = isFileLoaded(domain, urlPath, 'script', file.name);
                                       return (
-                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''}`}>
+                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''} ${!file.enabled ? 'disabled' : ''}`}>
                                           <div className="file-info">
                                             <strong className="file-name">
                                               {loaded && <span className="loaded-indicator" title="Loaded">✓</span>}
@@ -530,6 +604,13 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                             </span>
                                           </div>
                                           <div className="file-actions">
+                                            <button
+                                              className={`file-button toggle ${file.enabled ? 'enabled' : 'disabled'}`}
+                                              onClick={() => handleToggleEnabled(domain, urlPath, 'script', file.name, !file.enabled)}
+                                              title={file.enabled ? 'Disable script' : 'Enable script'}
+                                            >
+                                              {file.enabled ? '●' : '○'}
+                                            </button>
                                             <div className="copy-button-wrapper">
                                               <button
                                                 className="file-button copy"
@@ -561,14 +642,32 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
 
                               {files.styles.length > 0 && (
                                 <div className="file-group">
-                                  <h4>Styles</h4>
+                                  <div className="file-group-header">
+                                    <h4>Styles</h4>
+                                    <div className="bulk-actions">
+                                      <button
+                                        className="bulk-action-button enable"
+                                        onClick={() => handleSetAllEnabled(domain, urlPath, 'style', true)}
+                                        title="Enable all styles"
+                                      >
+                                        Enable All
+                                      </button>
+                                      <button
+                                        className="bulk-action-button disable"
+                                        onClick={() => handleSetAllEnabled(domain, urlPath, 'style', false)}
+                                        title="Disable all styles"
+                                      >
+                                        Disable All
+                                      </button>
+                                    </div>
+                                  </div>
                                   <ul className="files-list">
                                     {files.styles.map((file) => {
                                       const fileKey = `${domain}|${urlPath}|style|${file.name}`;
                                       const showDialog = copyDialogFile === fileKey;
                                       const loaded = isFileLoaded(domain, urlPath, 'style', file.name);
                                       return (
-                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''}`}>
+                                        <li key={file.name} className={`file-item ${loaded ? 'loaded' : ''} ${!file.enabled ? 'disabled' : ''}`}>
                                           <div className="file-info">
                                             <strong className="file-name">
                                               {loaded && <span className="loaded-indicator" title="Loaded">✓</span>}
@@ -579,6 +678,13 @@ export function ScriptsPanel({ tabId, onClose }: ScriptsPanelProps) {
                                             </span>
                                           </div>
                                           <div className="file-actions">
+                                            <button
+                                              className={`file-button toggle ${file.enabled ? 'enabled' : 'disabled'}`}
+                                              onClick={() => handleToggleEnabled(domain, urlPath, 'style', file.name, !file.enabled)}
+                                              title={file.enabled ? 'Disable style' : 'Enable style'}
+                                            >
+                                              {file.enabled ? '●' : '○'}
+                                            </button>
                                             <div className="copy-button-wrapper">
                                               <button
                                                 className="file-button copy"

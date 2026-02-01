@@ -105,8 +105,28 @@ export class VFSStorage {
       data.paths[urlPath] = {
         scripts: {},
         styles: {},
+        files: {},
         editRecords: [],
       };
+    }
+    // Migration: add files collection if missing (for existing data)
+    if (!data.paths[urlPath].files) {
+      data.paths[urlPath].files = {};
+    }
+  }
+
+  /**
+   * Get the file collection for a given type
+   */
+  private getFileCollection(
+    pathData: { scripts: Record<string, StoredFile>; styles: Record<string, StoredFile>; files: Record<string, StoredFile> },
+    type: FileType
+  ): Record<string, StoredFile> {
+    switch (type) {
+      case 'script': return pathData.scripts;
+      case 'style': return pathData.styles;
+      case 'file': return pathData.files;
+      default: throw new Error(`Unsupported file type for collection: ${type}`);
     }
   }
 
@@ -124,7 +144,8 @@ export class VFSStorage {
 
     // First try exact match
     if (data.paths[targetPath]) {
-      const collection = type === 'script' ? data.paths[targetPath].scripts : data.paths[targetPath].styles;
+      this.ensurePath(data, targetPath); // Ensure files collection exists
+      const collection = this.getFileCollection(data.paths[targetPath], type);
       return {
         file: collection[name] || null,
         matchedPattern: null,
@@ -137,8 +158,9 @@ export class VFSStorage {
 
     if (matches.length > 0) {
       const bestMatch = matches[0];
+      this.ensurePath(data, bestMatch.pattern); // Ensure files collection exists
       const pathData = data.paths[bestMatch.pattern];
-      const collection = type === 'script' ? pathData.scripts : pathData.styles;
+      const collection = this.getFileCollection(pathData, type);
       return {
         file: collection[name] || null,
         matchedPattern: bestMatch.pattern,
@@ -176,7 +198,7 @@ export class VFSStorage {
 
     this.ensurePath(data, path);
 
-    const collection = type === 'script' ? data.paths[path].scripts : data.paths[path].styles;
+    const collection = this.getFileCollection(data.paths[path], type);
     const existing = collection[name];
 
     // Check version (0 means new file)
@@ -219,7 +241,8 @@ export class VFSStorage {
       return false;
     }
 
-    const collection = type === 'script' ? data.paths[path].scripts : data.paths[path].styles;
+    this.ensurePath(data, path); // Ensure files collection exists
+    const collection = this.getFileCollection(data.paths[path], type);
 
     if (!collection[name]) {
       return false;
@@ -254,13 +277,15 @@ export class VFSStorage {
 
     // First try exact match (backwards compatible)
     if (data.paths[targetPath]) {
-      const collection = type === 'script' ? data.paths[targetPath].scripts : data.paths[targetPath].styles;
+      this.ensurePath(data, targetPath); // Ensure files collection exists
+      const collection = this.getFileCollection(data.paths[targetPath], type);
 
       return {
         files: Object.entries(collection).map(([name, file]) => ({
           name,
           version: file.version,
           modified: file.modified,
+          enabled: file.enabled !== false,  // undefined = enabled
         })),
         matchedPattern: null,
         params: {},
@@ -273,14 +298,16 @@ export class VFSStorage {
     if (matches.length > 0) {
       // Use highest priority match
       const bestMatch = matches[0];
+      this.ensurePath(data, bestMatch.pattern); // Ensure files collection exists
       const pathData = data.paths[bestMatch.pattern];
-      const collection = type === 'script' ? pathData.scripts : pathData.styles;
+      const collection = this.getFileCollection(pathData, type);
 
       return {
         files: Object.entries(collection).map(([name, file]) => ({
           name,
           version: file.version,
           modified: file.modified,
+          enabled: file.enabled !== false,  // undefined = enabled
         })),
         matchedPattern: bestMatch.pattern,
         params: bestMatch.params,
@@ -434,5 +461,67 @@ export class VFSStorage {
     const key = `${this.domain}:${normalizePath(urlPath)}`;
     planCache.delete(key);
     console.log('[VFS Storage] Plan cleared for:', key);
+  }
+
+  /**
+   * Toggle enabled state of a file
+   */
+  async toggleFileEnabled(
+    type: FileType,
+    name: string,
+    enabled: boolean,
+    urlPath?: string
+  ): Promise<boolean> {
+    const data = await this.load();
+    const path = normalizePath(urlPath || this.defaultUrlPath);
+
+    if (!data.paths[path]) {
+      return false;
+    }
+
+    this.ensurePath(data, path);
+    const collection = this.getFileCollection(data.paths[path], type);
+
+    if (!collection[name]) {
+      return false;
+    }
+
+    collection[name].enabled = enabled;
+    await this.save();
+
+    console.log('[VFS Storage] Toggled', name, 'enabled:', enabled);
+    return true;
+  }
+
+  /**
+   * Set enabled state for all files of a given type
+   */
+  async setAllFilesEnabled(
+    type: FileType,
+    enabled: boolean,
+    urlPath?: string
+  ): Promise<number> {
+    const data = await this.load();
+    const path = normalizePath(urlPath || this.defaultUrlPath);
+
+    if (!data.paths[path]) {
+      return 0;
+    }
+
+    this.ensurePath(data, path);
+    const collection = this.getFileCollection(data.paths[path], type);
+
+    let count = 0;
+    for (const name of Object.keys(collection)) {
+      collection[name].enabled = enabled;
+      count++;
+    }
+
+    if (count > 0) {
+      await this.save();
+      console.log('[VFS Storage] Set all', type, 'files enabled:', enabled, 'count:', count);
+    }
+
+    return count;
   }
 }

@@ -108,6 +108,21 @@ export class VirtualFS {
       normalizedPath = `/${this.domain}${this.urlPath}/${normalizedPath}`;
     }
 
+    // Check for files/* paths first: /{domain}/{url-path}/files/{file-path}
+    const filesMatch = normalizedPath.match(/^\/([^\/]+)((?:\/[^\/]*)*?)\/files\/(.+)$/);
+    if (filesMatch) {
+      const domain = filesMatch[1];
+      const urlPath = filesMatch[2] || '/';
+      const fileName = filesMatch[3]; // Can include nested paths like "data/users.json"
+      return {
+        domain,
+        urlPath,
+        fileType: 'file',
+        fileName,
+        fullPath: normalizedPath,
+      };
+    }
+
     // Parse: /{domain}/{url-path}/[page.html|console.log|screenshot.png|plan.md|scripts/name.js|styles/name.css]
     const match = normalizedPath.match(/^\/([^\/]+)(\/[^\/]*)*\/(page\.html|console\.log|screenshot\.png|plan\.md|scripts\/([^\/]+\.js)|styles\/([^\/]+\.css))$/);
 
@@ -275,6 +290,35 @@ export class VirtualFS {
       };
     }
 
+    if (parsed.fileType === 'file') {
+      // Read arbitrary file from files/ directory
+      const readResult = await this.storage.readFile('file', parsed.fileName, parsed.urlPath);
+      if (!readResult.file) {
+        return {
+          code: 'NOT_FOUND',
+          message: `File not found: ${path}`,
+          path,
+        };
+      }
+
+      let content = readResult.file.content;
+      const lines = content.split('\n');
+      const totalLines = lines.length;
+
+      if (offset !== undefined || limit !== undefined) {
+        const start = offset || 0;
+        const end = limit ? start + limit : undefined;
+        content = lines.slice(start, end).join('\n');
+      }
+
+      return {
+        content,
+        version: readResult.file.version,
+        lines: totalLines,
+        path: parsed.fullPath,
+      };
+    }
+
     // Read from storage
     const readResult = await this.storage.readFile(parsed.fileType, parsed.fileName, parsed.urlPath);
     if (!readResult.file) {
@@ -346,6 +390,17 @@ export class VirtualFS {
         };
       }
       return result;
+    }
+
+    if (parsed.fileType === 'file') {
+      // Write arbitrary file to files/ directory
+      return await this.storage.writeFile(
+        'file',
+        parsed.fileName,
+        content,
+        expectedVersion,
+        parsed.urlPath
+      );
     }
 
     // Write to storage
@@ -535,7 +590,14 @@ export class VirtualFS {
       type: 'directory',
     });
 
-    // If path ends with /scripts or /styles, list those files
+    // Show files directory
+    entries.push({
+      name: 'files',
+      path: `${targetPath}/files`,
+      type: 'directory',
+    });
+
+    // If path ends with /scripts, /styles, or /files, list those files
     if (targetPath.endsWith('/scripts')) {
       // Strip /scripts suffix to get the base URL path where files are stored
       const baseUrlPath = parsed.urlPath.replace(/\/scripts$/, '') || '/';
@@ -560,6 +622,64 @@ export class VirtualFS {
           type: 'file',
           version: style.version,
           modified: style.modified,
+        });
+      }
+    } else if (targetPath.endsWith('/files') || targetPath.includes('/files/')) {
+      // List files in the files/ directory (supports nested paths)
+      const baseUrlPath = parsed.urlPath.replace(/\/files(\/.*)?$/, '') || '/';
+      const filesResult = await this.storage.listFiles('file', baseUrlPath);
+
+      // Get the subdirectory path within files/ if any
+      const filesMatch = targetPath.match(/\/files(\/.*)?$/);
+      const subPath = filesMatch?.[1]?.slice(1) || ''; // Remove leading slash
+
+      // Group files by directory for nested listing
+      const dirs = new Set<string>();
+      for (const file of filesResult.files) {
+        if (subPath) {
+          // Only show files/dirs that are under the subPath
+          if (file.name.startsWith(subPath + '/')) {
+            const remaining = file.name.slice(subPath.length + 1);
+            const slashIndex = remaining.indexOf('/');
+            if (slashIndex === -1) {
+              // It's a file directly in this directory
+              entries.push({
+                name: remaining,
+                path: `${targetPath}/${remaining}`,
+                type: 'file',
+                version: file.version,
+                modified: file.modified,
+              });
+            } else {
+              // It's in a subdirectory
+              dirs.add(remaining.slice(0, slashIndex));
+            }
+          }
+        } else {
+          // At the root of files/
+          const slashIndex = file.name.indexOf('/');
+          if (slashIndex === -1) {
+            // It's a file directly in files/
+            entries.push({
+              name: file.name,
+              path: `${targetPath}/${file.name}`,
+              type: 'file',
+              version: file.version,
+              modified: file.modified,
+            });
+          } else {
+            // It's in a subdirectory
+            dirs.add(file.name.slice(0, slashIndex));
+          }
+        }
+      }
+
+      // Add subdirectories
+      for (const dir of dirs) {
+        entries.push({
+          name: dir,
+          path: `${targetPath}/${dir}`,
+          type: 'directory',
         });
       }
     }
@@ -605,6 +725,15 @@ export class VirtualFS {
       }
     }
 
+    // Check files
+    const filesResult = await this.storage.listFiles('file', this.urlPath);
+    for (const file of filesResult.files) {
+      const filePath = `${cwd}/files/${file.name}`;
+      if (regex.test(filePath)) {
+        matches.push(filePath);
+      }
+    }
+
     return matches;
   }
 
@@ -637,6 +766,16 @@ export class VirtualFS {
         } else if (path.endsWith('/styles')) {
           const styleResult = await this.storage.listFiles('style', this.urlPath);
           styleResult.files.forEach(s => filesToSearch.push(`${cwd}/styles/${s.name}`));
+        } else if (path.endsWith('/files') || path.includes('/files/')) {
+          const filesResult = await this.storage.listFiles('file', this.urlPath);
+          // Handle subpath within files/
+          const filesMatch = path.match(/\/files(\/.*)?$/);
+          const subPath = filesMatch?.[1]?.slice(1) || ''; // Remove leading slash
+          for (const f of filesResult.files) {
+            if (!subPath || f.name.startsWith(subPath + '/') || f.name === subPath) {
+              filesToSearch.push(`${cwd}/files/${f.name}`);
+            }
+          }
         } else {
           filesToSearch.push(`${cwd}/page.html`);
         }
@@ -777,7 +916,11 @@ export class VirtualFS {
     const styleResult = await this.storage.listFiles('style', this.urlPath);
     const scriptResult = await this.storage.listFiles('script', this.urlPath);
 
-    console.log('[VFS] Found styles:', styleResult.files.map(s => s.name));
+    // Filter to only enabled files
+    const enabledStyles = styleResult.files.filter(s => s.enabled);
+    const enabledScripts = scriptResult.files.filter(s => s.enabled);
+
+    console.log('[VFS] Found styles:', styleResult.files.map(s => s.name), 'enabled:', enabledStyles.map(s => s.name));
     if (styleResult.matchedPattern) {
       console.log('[VFS] Matched style pattern:', styleResult.matchedPattern, 'params:', styleResult.params);
     }
@@ -788,8 +931,8 @@ export class VirtualFS {
       await this.injectRouteParams(allParams);
     }
 
-    // Inject all saved styles (always works, not affected by CSP)
-    for (const style of styleResult.files) {
+    // Inject only enabled styles (always works, not affected by CSP)
+    for (const style of enabledStyles) {
       const readResult = await this.storage.readFile('style', style.name, this.urlPath);
       if (readResult.file) {
         this.injectStyle(style.name, readResult.file.content);
@@ -812,12 +955,13 @@ export class VirtualFS {
 
     // No userScripts API - try manual injection (will fail on strict CSP pages)
     console.log('[VFS] No userScripts API, attempting manual script injection');
-    console.log('[VFS] Found scripts:', scriptResult.files.map(s => s.name));
+    console.log('[VFS] Found scripts:', scriptResult.files.map(s => s.name), 'enabled:', enabledScripts.map(s => s.name));
     if (scriptResult.matchedPattern) {
       console.log('[VFS] Matched script pattern:', scriptResult.matchedPattern, 'params:', scriptResult.params);
     }
 
-    for (const script of scriptResult.files) {
+    // Only inject enabled scripts
+    for (const script of enabledScripts) {
       const readResult = await this.storage.readFile('script', script.name, this.urlPath);
       if (readResult.file) {
         console.log('[VFS] Executing script:', script.name);
@@ -875,7 +1019,7 @@ export class VirtualFS {
    * List all scripts for current URL path
    */
   async listScripts(): Promise<{
-    files: Array<{ name: string; version: number; modified: number }>;
+    files: Array<{ name: string; version: number; modified: number; enabled: boolean }>;
     matchedPattern: string | null;
   }> {
     const result = await this.storage.listFiles('script', this.urlPath);
@@ -889,7 +1033,7 @@ export class VirtualFS {
    * List all styles for current URL path
    */
   async listStyles(): Promise<{
-    files: Array<{ name: string; version: number; modified: number }>;
+    files: Array<{ name: string; version: number; modified: number; enabled: boolean }>;
     matchedPattern: string | null;
   }> {
     const result = await this.storage.listFiles('style', this.urlPath);
@@ -897,6 +1041,20 @@ export class VirtualFS {
       files: result.files,
       matchedPattern: result.matchedPattern,
     };
+  }
+
+  /**
+   * Toggle enabled state of a file
+   */
+  async toggleFileEnabled(type: 'script' | 'style', name: string, enabled: boolean): Promise<boolean> {
+    return this.storage.toggleFileEnabled(type, name, enabled, this.urlPath);
+  }
+
+  /**
+   * Set enabled state for all files of a type
+   */
+  async setAllFilesEnabled(type: 'script' | 'style', enabled: boolean): Promise<number> {
+    return this.storage.setAllFilesEnabled(type, enabled, this.urlPath);
   }
 
   /**
@@ -909,7 +1067,7 @@ export class VirtualFS {
   /**
    * Delete a file
    */
-  async deleteFile(type: 'script' | 'style', name: string): Promise<boolean> {
+  async deleteFile(type: 'script' | 'style' | 'file', name: string): Promise<boolean> {
     const success = await this.storage.deleteFile(type, name, this.urlPath);
 
     // If it's a style, also remove from DOM

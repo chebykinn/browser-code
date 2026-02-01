@@ -124,8 +124,8 @@ export interface DomainExportData {
 }
 
 export interface PathExportData {
-  scripts: Record<string, { content: string; version: number; created: number; modified: number }>;
-  styles: Record<string, { content: string; version: number; created: number; modified: number }>;
+  scripts: Record<string, { content: string; version: number; created: number; modified: number; enabled?: boolean }>;
+  styles: Record<string, { content: string; version: number; created: number; modified: number; enabled?: boolean }>;
   editRecords?: Array<{ selector: string; oldContent: string; newContent: string; timestamp: number }>;
 }
 
@@ -237,6 +237,23 @@ export interface RejectPlanMessage {
   feedback?: string;
 }
 
+export interface ToggleVfsFileEnabledMessage {
+  type: 'TOGGLE_VFS_FILE_ENABLED';
+  domain: string;
+  urlPath: string;
+  fileType: 'script' | 'style';
+  fileName: string;
+  enabled: boolean;
+}
+
+export interface SetAllVfsFilesEnabledMessage {
+  type: 'SET_ALL_VFS_FILES_ENABLED';
+  domain: string;
+  urlPath: string;
+  fileType: 'script' | 'style';
+  enabled: boolean;
+}
+
 // Union types
 export type SidebarToBackgroundMessage =
   | ChatMessage
@@ -265,7 +282,9 @@ export type SidebarToBackgroundMessage =
   | SetModeMessage
   | GetModeMessage
   | ApprovePlanMessage
-  | RejectPlanMessage;
+  | RejectPlanMessage
+  | ToggleVfsFileEnabledMessage
+  | SetAllVfsFilesEnabledMessage;
 
 export interface GetVfsFilesContentMessage {
   type: 'GET_VFS_FILES';
@@ -294,6 +313,16 @@ export type BackgroundToContentMessage =
   | InvalidateVfsCacheContentMessage
   | VfsReadContentMessage;
 
+// VFS storage changed message (Firefox fix: relay storage changes via port)
+export interface VfsStorageChangedMessage {
+  type: 'VFS_STORAGE_CHANGED';
+  changes: Array<{
+    key: string;
+    newValue?: unknown;
+    oldValue?: unknown;
+  }>;
+}
+
 export type BackgroundToSidebarMessage =
   | AgentResponseMessage
   | ToolCallMessage
@@ -301,7 +330,8 @@ export type BackgroundToSidebarMessage =
   | AgentDoneMessage
   | AgentErrorMessage
   | ModeChangedMessage
-  | TodosUpdatedMessage;
+  | TodosUpdatedMessage
+  | VfsStorageChangedMessage;
 
 // Settings
 export interface Settings {

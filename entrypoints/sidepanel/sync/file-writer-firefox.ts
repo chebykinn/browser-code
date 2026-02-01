@@ -5,11 +5,14 @@
  * Uses:
  * - filename: creates subfolders automatically
  * - conflictAction: "overwrite" to update existing files
- * - incognito: true to avoid polluting download history
  * - saveAs: false to skip the save dialog
+ * - erase: removes from download history after completion (incognito not supported in Firefox)
  */
 
+import type { DownloadResult } from './types';
+
 const BASE_FOLDER = 'browser-code-fs';
+const DOWNLOAD_TIMEOUT_MS = 30000; // 30 second timeout for downloads
 
 /**
  * Create a blob URL for content
@@ -53,17 +56,76 @@ function getMimeType(filename: string): string {
   return mimeTypes[ext || ''] || 'text/plain';
 }
 
+interface DownloadDelta {
+  id: number;
+  state?: { current?: string };
+  error?: { current?: string };
+}
+
+/**
+ * Wait for download to complete with timeout
+ */
+function waitForDownloadWithTimeout(
+  downloadId: number,
+  timeoutMs: number = DOWNLOAD_TIMEOUT_MS
+): Promise<{ success: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    let resolved = false;
+
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        browser.downloads.onChanged.removeListener(listener);
+      }
+    };
+
+    const listener = (delta: DownloadDelta) => {
+      if (delta.id !== downloadId) return;
+
+      if (delta.state?.current === 'complete') {
+        cleanup();
+        resolve({ success: true });
+      } else if (delta.error?.current) {
+        cleanup();
+        resolve({ success: false, error: delta.error.current });
+      }
+    };
+
+    browser.downloads.onChanged.addListener(listener);
+
+    // Timeout handler
+    setTimeout(() => {
+      if (!resolved) {
+        cleanup();
+        resolve({ success: false, error: 'Download timed out' });
+      }
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Erase download from history (keeps file on disk)
+ */
+async function eraseFromHistory(downloadId: number): Promise<void> {
+  try {
+    await browser.downloads.erase({ id: downloadId });
+  } catch (error) {
+    // Silently ignore erase errors - not critical
+    console.debug('[Sync] Failed to erase download from history:', error);
+  }
+}
+
 /**
  * Write a file using Downloads API
  *
  * @param relativePath - Path relative to browser-code-fs folder (e.g., "example.com/scripts/app.js")
  * @param content - File content
- * @returns Download ID
+ * @returns DownloadResult with success status
  */
 export async function writeFile(
   relativePath: string,
   content: string
-): Promise<number> {
+): Promise<DownloadResult> {
   const sanitizedPath = sanitizePath(relativePath);
   const filename = `${BASE_FOLDER}/${sanitizedPath}`;
   const mimeType = getMimeType(sanitizedPath);
@@ -76,14 +138,27 @@ export async function writeFile(
       filename,
       conflictAction: 'overwrite',
       saveAs: false,
-      // @ts-expect-error - incognito is valid but not in all type defs
-      incognito: true,
+      // Note: incognito: true is NOT supported in Firefox and causes silent failures
     }) as unknown as number;
 
-    return downloadId;
-  } finally {
-    // Clean up blob URL after a delay to ensure download starts
-    setTimeout(() => revokeBlobUrl(blobUrl), 1000);
+    // Wait for download to complete
+    const result = await waitForDownloadWithTimeout(downloadId);
+
+    // Clean up blob URL after download completes (not on timer)
+    revokeBlobUrl(blobUrl);
+
+    if (result.success) {
+      // Remove from download history to keep it clean (like incognito would)
+      await eraseFromHistory(downloadId);
+      return { downloadId, success: true };
+    } else {
+      return { downloadId, success: false, error: result.error };
+    }
+  } catch (error) {
+    // Clean up blob URL on error
+    revokeBlobUrl(blobUrl);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown download error';
+    return { downloadId: -1, success: false, error: errorMessage };
   }
 }
 
@@ -92,15 +167,15 @@ export async function writeFile(
  */
 export async function writeFiles(
   files: Array<{ path: string; content: string }>
-): Promise<number[]> {
-  const downloadIds: number[] = [];
+): Promise<DownloadResult[]> {
+  const results: DownloadResult[] = [];
 
   for (const file of files) {
-    const id = await writeFile(file.path, file.content);
-    downloadIds.push(id);
+    const result = await writeFile(file.path, file.content);
+    results.push(result);
   }
 
-  return downloadIds;
+  return results;
 }
 
 /**
@@ -109,22 +184,9 @@ export async function writeFiles(
 export async function exportAsJson(
   data: unknown,
   filename = 'browser-code-export.json'
-): Promise<number> {
+): Promise<DownloadResult> {
   const content = JSON.stringify(data, null, 2);
-  const blobUrl = createBlobUrl(content, 'application/json');
-
-  try {
-    return await browser.downloads.download({
-      url: blobUrl,
-      filename: `${BASE_FOLDER}/${filename}`,
-      conflictAction: 'overwrite',
-      saveAs: false,
-      // @ts-expect-error - incognito is valid
-      incognito: true,
-    }) as unknown as number;
-  } finally {
-    setTimeout(() => revokeBlobUrl(blobUrl), 1000);
-  }
+  return writeFile(filename, content);
 }
 
 /**
@@ -141,26 +203,20 @@ function normalizeSyncPath(domain: string, urlPath: string, type: string, name: 
  */
 export async function exportFiles(
   files: Array<{ domain: string; urlPath: string; type: 'scripts' | 'styles'; name: string; content: string }>
-): Promise<number[]> {
-  const downloadIds: number[] = [];
+): Promise<DownloadResult[]> {
+  const results: DownloadResult[] = [];
 
   for (const file of files) {
     const relativePath = normalizeSyncPath(file.domain, file.urlPath, file.type, file.name);
-    const id = await writeFile(relativePath, file.content);
-    downloadIds.push(id);
+    const result = await writeFile(relativePath, file.content);
+    results.push(result);
   }
 
-  return downloadIds;
-}
-
-interface DownloadDelta {
-  id: number;
-  state?: { current?: string };
-  error?: { current?: string };
+  return results;
 }
 
 /**
- * Watch for download completion
+ * Watch for download completion (legacy compatibility)
  */
 export function onDownloadComplete(
   downloadId: number,
@@ -185,7 +241,7 @@ export function onDownloadComplete(
 }
 
 /**
- * Wait for download to complete
+ * Wait for download to complete (legacy compatibility)
  */
 export function waitForDownload(downloadId: number): Promise<boolean> {
   return new Promise((resolve) => {

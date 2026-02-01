@@ -46,18 +46,20 @@ export interface StoredFile {
   version: number;
   created: number;
   modified: number;
+  enabled?: boolean;  // Optional, defaults to true if undefined
 }
 
 export interface DomainStorage {
-  // URL path -> scripts/styles
+  // URL path -> scripts/styles/files
   paths: Record<string, {
     scripts: Record<string, StoredFile>;
     styles: Record<string, StoredFile>;
+    files: Record<string, StoredFile>;
     editRecords: EditRecord[];
   }>;
 }
 
-export type FileType = 'page' | 'script' | 'style' | 'console' | 'screenshot' | 'plan';
+export type FileType = 'page' | 'script' | 'style' | 'console' | 'screenshot' | 'plan' | 'file';
 
 export interface ParsedPath {
   domain: string;
@@ -71,7 +73,7 @@ export interface ParsedPath {
  * Result of listing files with route matching support
  */
 export interface FileListResult {
-  files: Array<{ name: string; version: number; modified: number }>;
+  files: Array<{ name: string; version: number; modified: number; enabled: boolean }>;
   /** The pattern that matched, or null if no match/exact match */
   matchedPattern: string | null;
   /** Extracted route parameters */

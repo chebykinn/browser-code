@@ -1276,3 +1276,89 @@ body {
   font-size: 12px;
   color: #a0c0a0;
 }
+
+/* File group header with bulk actions */
+.file-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.file-group-header h4 {
+  font-size: 12px;
+  color: #888;
+  margin: 0;
+}
+
+/* Bulk actions */
+.bulk-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.bulk-action-button {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 3px;
+  font-size: 10px;
+  cursor: pointer;
+  color: #e0e0e0;
+}
+
+.bulk-action-button.enable {
+  background: #2d5a3d;
+}
+
+.bulk-action-button.enable:hover {
+  background: #3d6a4d;
+}
+
+.bulk-action-button.disable {
+  background: #5a4a3d;
+}
+
+.bulk-action-button.disable:hover {
+  background: #6a5a4d;
+}
+
+/* Toggle button */
+.file-button.toggle {
+  background: transparent;
+  border: 1px solid #444;
+  font-size: 12px;
+  min-width: 24px;
+  padding: 2px 6px;
+}
+
+.file-button.toggle.enabled {
+  color: #10b981;
+  border-color: #2d5a3d;
+}
+
+.file-button.toggle.enabled:hover {
+  background: #1e3a2a;
+}
+
+.file-button.toggle.disabled {
+  color: #666;
+  border-color: #444;
+}
+
+.file-button.toggle.disabled:hover {
+  background: #333;
+}
+
+/* Disabled file item */
+.file-item.disabled {
+  opacity: 0.5;
+}
+
+.file-item.disabled .file-name {
+  color: #888;
+}
+
+.file-item.disabled.loaded {
+  background: #252525;
+  border-left-color: #666;
+}

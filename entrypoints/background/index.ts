@@ -1,5 +1,6 @@
 import { runAgent } from './claude/client';
 import { getSettings, saveSettings, getEditsForUrl, saveEdit, deleteEdit, getAllEdits } from './storage';
+import { initKeepAliveListener, startKeepAlive, stopKeepAlive } from './keep-alive';
 import type {
   SidebarToBackgroundMessage,
   BackgroundToSidebarMessage,
@@ -152,8 +153,28 @@ const tabTodos = new Map<number, TodoItem[]>();
 // Track if agent is awaiting plan approval per tab
 const awaitingPlanApproval = new Map<number, boolean>();
 
+// Reference counter for keep-alive management
+let activeAgentCount = 0;
+
+async function incrementActiveAgents(): Promise<void> {
+  activeAgentCount++;
+  if (activeAgentCount === 1) {
+    await startKeepAlive();
+  }
+}
+
+async function decrementActiveAgents(): Promise<void> {
+  activeAgentCount = Math.max(0, activeAgentCount - 1);
+  if (activeAgentCount === 0) {
+    await stopKeepAlive();
+  }
+}
+
 export default defineBackground(() => {
   console.log('[Page Editor] Background script loaded');
+
+  // Initialize keep-alive alarm listener
+  initKeepAliveListener();
 
   // Initialize userScripts API for running user scripts (Chrome MV3)
   initUserScripts();
@@ -261,6 +282,9 @@ async function handleMessage(
       const mode = tabModes.get(tabId) || 'plan';
       const todos = tabTodos.get(tabId) || [];
 
+      // Start keep-alive before running agent
+      await incrementActiveAgents();
+
       // Run the agent with existing history
       // CRITICAL: Use LIVE port lookup in callbacks so reconnecting sidebar receives messages
       await runAgent(message.content, {
@@ -305,8 +329,9 @@ async function handleMessage(
               todos: updatedTodos,
             });
           },
-          onDone: () => {
+          onDone: async () => {
             activeAgents.delete(tabId);
+            await decrementActiveAgents();
             const currentPort = sidebarPorts.get(tabId);
             // In plan mode, mark as awaiting approval
             if (mode === 'plan') {
@@ -314,8 +339,9 @@ async function handleMessage(
             }
             sendToSidebar(currentPort, { type: 'AGENT_DONE' });
           },
-          onError: (error) => {
+          onError: async (error) => {
             activeAgents.delete(tabId);
+            await decrementActiveAgents();
             const currentPort = sidebarPorts.get(tabId);
             sendToSidebar(currentPort, { type: 'AGENT_ERROR', error });
           },
@@ -332,6 +358,7 @@ async function handleMessage(
         console.log('[Page Editor] Stopping agent for tabId:', tabId);
         controller.abort();
         activeAgents.delete(tabId);
+        await decrementActiveAgents();
       }
       return { success: true };
     }
@@ -390,8 +417,10 @@ async function handleMessage(
       const currentPort = sidebarPorts.get(tabId);
       sendToSidebar(currentPort, { type: 'MODE_CHANGED', mode: 'execute' });
 
-      // Clear history for fresh execution
-      conversationHistory.delete(tabId);
+      // Create fresh history for execution and store it in the map
+      // so mutations during execution are tracked
+      const execHistory: Message[] = [];
+      conversationHistory.set(tabId, execHistory);
 
       // Fetch the plan.md content from the content script
       let planContent = '';
@@ -425,11 +454,14 @@ async function handleMessage(
         const abortController = new AbortController();
         activeAgents.set(tabId, abortController);
 
+        // Start keep-alive before running agent
+        await incrementActiveAgents();
+
         runAgent(planContext, {
           apiKey: settings.apiKey,
           model: settings.model,
           tabId,
-          history: [],
+          history: execHistory,
           abortSignal: abortController.signal,
           mode: 'execute',
           todos,
@@ -451,13 +483,15 @@ async function handleMessage(
               const port = sidebarPorts.get(tabId);
               sendToSidebar(port, { type: 'TODOS_UPDATED', todos: updatedTodos });
             },
-            onDone: () => {
+            onDone: async () => {
               activeAgents.delete(tabId);
+              await decrementActiveAgents();
               const port = sidebarPorts.get(tabId);
               sendToSidebar(port, { type: 'AGENT_DONE' });
             },
-            onError: (error) => {
+            onError: async (error) => {
               activeAgents.delete(tabId);
+              await decrementActiveAgents();
               const port = sidebarPorts.get(tabId);
               sendToSidebar(port, { type: 'AGENT_ERROR', error });
             },
@@ -486,6 +520,9 @@ async function handleMessage(
 
           const todos = tabTodos.get(tabId) || [];
 
+          // Start keep-alive before running agent
+          await incrementActiveAgents();
+
           runAgent(`Please revise the plan based on this feedback: ${feedback}`, {
             apiKey: settings.apiKey,
             model: settings.model,
@@ -512,14 +549,16 @@ async function handleMessage(
                 const port = sidebarPorts.get(tabId);
                 sendToSidebar(port, { type: 'TODOS_UPDATED', todos: updatedTodos });
               },
-              onDone: () => {
+              onDone: async () => {
                 activeAgents.delete(tabId);
+                await decrementActiveAgents();
                 awaitingPlanApproval.set(tabId, true);
                 const port = sidebarPorts.get(tabId);
                 sendToSidebar(port, { type: 'AGENT_DONE' });
               },
-              onError: (error) => {
+              onError: async (error) => {
                 activeAgents.delete(tabId);
+                await decrementActiveAgents();
                 const port = sidebarPorts.get(tabId);
                 sendToSidebar(port, { type: 'AGENT_ERROR', error });
               },
@@ -661,7 +700,7 @@ async function handleMessage(
     case 'GET_ALL_VFS_FILES': {
       try {
         const allStorage = await browser.storage.local.get(null);
-        type FileInfo = { name: string; version: number; modified: number };
+        type FileInfo = { name: string; version: number; modified: number; enabled: boolean };
         const allFiles: Record<string, { paths: Record<string, { scripts: FileInfo[]; styles: FileInfo[] }> }> = {};
 
         for (const [key, value] of Object.entries(allStorage)) {
@@ -675,11 +714,13 @@ async function handleMessage(
                   name,
                   version: (file as { version: number }).version,
                   modified: (file as { modified: number }).modified,
+                  enabled: (file as { enabled?: boolean }).enabled !== false,  // undefined = enabled
                 }));
                 const styles: FileInfo[] = Object.entries(pathData.styles || {}).map(([name, file]) => ({
                   name,
                   version: (file as { version: number }).version,
                   modified: (file as { modified: number }).modified,
+                  enabled: (file as { enabled?: boolean }).enabled !== false,  // undefined = enabled
                 }));
                 if (scripts.length > 0 || styles.length > 0) {
                   allFiles[domain].paths[urlPath] = { scripts, styles };
@@ -871,6 +912,82 @@ async function handleMessage(
       } catch (error) {
         console.error('[Page Editor] DELETE_VFS_FILE_ANY error:', error);
         return { success: false, error: String(error) };
+      }
+    }
+
+    case 'TOGGLE_VFS_FILE_ENABLED': {
+      try {
+        const { domain, urlPath, fileType, fileName, enabled } = message as {
+          domain: string;
+          urlPath: string;
+          fileType: 'script' | 'style';
+          fileName: string;
+          enabled: boolean;
+        };
+        const storageKey = `vfs:${domain}`;
+
+        const result = await browser.storage.local.get(storageKey);
+        const domainData = result[storageKey] as DomainExportData;
+
+        if (!domainData?.paths?.[urlPath]) {
+          return { success: false, error: 'Path not found' };
+        }
+
+        const collection = fileType === 'script'
+          ? domainData.paths[urlPath].scripts
+          : domainData.paths[urlPath].styles;
+
+        if (!collection?.[fileName]) {
+          return { success: false, error: 'File not found' };
+        }
+
+        collection[fileName].enabled = enabled;
+        await browser.storage.local.set({ [storageKey]: domainData });
+
+        console.log('[Page Editor] Toggled', fileName, 'enabled:', enabled);
+        return { success: true };
+      } catch (error) {
+        console.error('[Page Editor] TOGGLE_VFS_FILE_ENABLED error:', error);
+        return { success: false, error: String(error) };
+      }
+    }
+
+    case 'SET_ALL_VFS_FILES_ENABLED': {
+      try {
+        const { domain, urlPath, fileType, enabled } = message as {
+          domain: string;
+          urlPath: string;
+          fileType: 'script' | 'style';
+          enabled: boolean;
+        };
+        const storageKey = `vfs:${domain}`;
+
+        const result = await browser.storage.local.get(storageKey);
+        const domainData = result[storageKey] as DomainExportData;
+
+        if (!domainData?.paths?.[urlPath]) {
+          return { success: false, error: 'Path not found', count: 0 };
+        }
+
+        const collection = fileType === 'script'
+          ? domainData.paths[urlPath].scripts
+          : domainData.paths[urlPath].styles;
+
+        let count = 0;
+        for (const name of Object.keys(collection || {})) {
+          collection[name].enabled = enabled;
+          count++;
+        }
+
+        if (count > 0) {
+          await browser.storage.local.set({ [storageKey]: domainData });
+        }
+
+        console.log('[Page Editor] Set all', fileType, 'files enabled:', enabled, 'count:', count);
+        return { success: true, count };
+      } catch (error) {
+        console.error('[Page Editor] SET_ALL_VFS_FILES_ENABLED error:', error);
+        return { success: false, error: String(error), count: 0 };
       }
     }
 
@@ -1219,10 +1336,26 @@ async function initUserScripts(): Promise<void> {
     // Listen for storage changes to update registrations
     browser.storage.onChanged.addListener((changes, areaName) => {
       if (areaName === 'local') {
-        const vfsChanged = Object.keys(changes).some(key => key.startsWith('vfs:'));
-        if (vfsChanged) {
+        const vfsChanges = Object.entries(changes)
+          .filter(([key]) => key.startsWith('vfs:'))
+          .map(([key, change]) => ({ key, ...change }));
+
+        if (vfsChanges.length > 0) {
           console.log('[Page Editor] VFS storage changed, syncing userScripts');
           syncUserScripts();
+
+          // Relay VFS changes to all connected sidepanels (Firefox fix)
+          // Firefox MV3 doesn't broadcast storage.onChanged cross-context
+          for (const [tabId, port] of sidebarPorts) {
+            try {
+              port.postMessage({
+                type: 'VFS_STORAGE_CHANGED',
+                changes: vfsChanges,
+              });
+            } catch (e) {
+              // Port may be disconnected
+            }
+          }
         }
       }
     });
@@ -1276,6 +1409,12 @@ async function syncUserScripts(): Promise<void> {
         if (!pathData.scripts) continue;
 
         for (const [scriptName, scriptFile] of Object.entries(pathData.scripts)) {
+          // Skip disabled scripts (enabled !== false means enabled, undefined = enabled)
+          if (scriptFile.enabled === false) {
+            console.log('[Page Editor] Skipping disabled script:', scriptName);
+            continue;
+          }
+
           const scriptId = `vfs_${domain}_${urlPath}_${scriptName}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
           // Create match pattern for this domain/path (supports dynamic routes)

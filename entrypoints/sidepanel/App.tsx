@@ -38,6 +38,10 @@ export function App() {
   type Port = ReturnType<typeof browser.runtime.connect>;
   const portRef = useRef<Port | null>(null);
 
+  // Track all ports across tab switches (ports stay alive)
+  const portsRef = useRef<Map<number, Port>>(new Map());
+  const tabIdRef = useRef<number | null>(null);
+
 
   // Refs to always get latest state setters (fixes React Strict Mode issues)
   const setMessagesRef = useRef(setMessages);
@@ -51,6 +55,11 @@ export function App() {
   setTodosRef.current = setTodos;
   setAwaitingApprovalRef.current = setAwaitingApproval;
 
+  // Keep tabIdRef in sync with state
+  useEffect(() => {
+    tabIdRef.current = tabId;
+  }, [tabId]);
+
   // Load settings and get current tab
   useEffect(() => {
     async function init() {
@@ -58,8 +67,9 @@ export function App() {
       const response = await browser.runtime.sendMessage({ type: 'GET_SETTINGS' });
       setSettings(response);
 
-      // Get current tab
-      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      // Get current tab - use explicit windowId for Firefox sidebar compatibility
+      const currentWindow = await browser.windows.getCurrent();
+      const [tab] = await browser.tabs.query({ active: true, windowId: currentWindow.id });
       if (tab?.id) {
         setTabId(tab.id);
       }
@@ -68,6 +78,11 @@ export function App() {
       if (!response.apiKey) {
         setShowSettings(true);
       }
+
+      // Initialize sync manager (will auto-start if previously enabled)
+      import('./sync').then(({ getSyncManager }) => {
+        getSyncManager().init();
+      });
 
       // Get mode and todos for this tab
       if (tab?.id) {
@@ -131,157 +146,220 @@ export function App() {
       });
     };
 
+    // Listen for window focus changes (Firefox: sidebar is shared across windows)
+    const handleWindowFocusChanged = async (windowId: number) => {
+      // WINDOW_ID_NONE (-1) means focus left the browser entirely
+      if (windowId === browser.windows.WINDOW_ID_NONE) return;
+
+      // Get the active tab in the newly focused window
+      const [tab] = await browser.tabs.query({ active: true, windowId });
+      if (tab?.id) {
+        setTabId((currentTabId) => {
+          if (currentTabId !== tab.id) {
+            console.log('[Page Editor] Window focus changed, switching to tab', tab.id);
+          }
+          return tab.id!;
+        });
+      }
+    };
+
     browser.tabs.onActivated.addListener(handleTabActivated);
+    browser.windows.onFocusChanged.addListener(handleWindowFocusChanged);
+
     return () => {
       browser.tabs.onActivated.removeListener(handleTabActivated);
+      browser.windows.onFocusChanged.removeListener(handleWindowFocusChanged);
     };
   }, []);
 
   // Set up port connection to background - keyed by tabId for reconnection support
+  // Ports are kept alive across tab switches to ensure agent messages continue streaming
   useEffect(() => {
     // Wait for tabId before connecting
     if (!tabId) return;
 
-    console.log(`[Sidebar tab:${tabId}] Setting up port connection...`);
-    // Use tabId in port name so background can route messages after reconnection
-    const port = browser.runtime.connect({ name: `sidebar:tab:${tabId}` });
+    // Check if we already have a port for this tab
+    let port = portsRef.current.get(tabId);
+
+    if (!port) {
+      console.log(`[Sidebar tab:${tabId}] Creating new port connection...`);
+      // Use tabId in port name so background can route messages after reconnection
+      port = browser.runtime.connect({ name: `sidebar:tab:${tabId}` });
+      portsRef.current.set(tabId, port);
+
+      const thisTabId = tabId; // Capture for closure
+
+      const messageHandler = (message: BackgroundToSidebarMessage) => {
+        // Process all messages - port routing already isolates by tabId
+        // Removed stale tabIdRef check that caused Firefox streaming bugs
+        console.log(`[Sidebar tab:${thisTabId}] Received message:`, message.type);
+
+        switch (message.type) {
+          case 'AGENT_RESPONSE': {
+            console.log(`[Sidebar tab:${thisTabId}] AGENT_RESPONSE`);
+            const content = message.content;
+            setTimeout(() => {
+              setMessagesRef.current((prev) => {
+                console.log(`[Sidebar tab:${thisTabId}] setMessages prev:`, prev.length);
+                const lastMessage = prev[prev.length - 1];
+                if (lastMessage?.role === 'assistant') {
+                  return [
+                    ...prev.slice(0, -1),
+                    { ...lastMessage, content },
+                  ];
+                } else {
+                  return [
+                    ...prev,
+                    {
+                      id: crypto.randomUUID(),
+                      role: 'assistant' as const,
+                      content,
+                      toolCalls: [],
+                    },
+                  ];
+                }
+              });
+            }, 0);
+            break;
+          }
+
+          case 'TOOL_CALL': {
+            console.log('[Page Editor Sidebar] TOOL_CALL:', message.toolName);
+            const toolName = message.toolName;
+            const toolInput = message.input;
+            const toolId = message.toolCallId;
+            setTimeout(() => {
+              setMessagesRef.current((prev) => {
+                const lastMessage = prev[prev.length - 1];
+                if (lastMessage?.role === 'assistant') {
+                  return [
+                    ...prev.slice(0, -1),
+                    {
+                      ...lastMessage,
+                      toolCalls: [
+                        ...(lastMessage.toolCalls || []),
+                        { name: toolName, input: toolInput, id: toolId },
+                      ],
+                    },
+                  ];
+                }
+                return prev;
+              });
+            }, 0);
+
+            break;
+          }
+
+          case 'TOOL_RESULT': {
+            const resultToolId = message.toolCallId;
+            const resultData = message.result;
+            setTimeout(() => {
+              setMessagesRef.current((prev) => {
+                const lastMessage = prev[prev.length - 1];
+                if (lastMessage?.role === 'assistant' && lastMessage.toolCalls) {
+                  const updatedToolCalls = lastMessage.toolCalls.map((tc) =>
+                    tc.id === resultToolId ? { ...tc, result: resultData } : tc
+                  );
+                  return [
+                    ...prev.slice(0, -1),
+                    { ...lastMessage, toolCalls: updatedToolCalls },
+                  ];
+                }
+                return prev;
+              });
+            }, 0);
+            break;
+          }
+
+          case 'AGENT_DONE': {
+            setTimeout(() => {
+              setIsLoadingRef.current(false);
+              // Check if we're awaiting approval after plan mode completes
+              browser.runtime.sendMessage({ type: 'GET_MODE', tabId: thisTabId }).then((response) => {
+                setAwaitingApprovalRef.current(response.awaitingApproval || false);
+              });
+            }, 0);
+            break;
+          }
+
+          case 'MODE_CHANGED': {
+            setTimeout(() => {
+              setModeRef.current(message.mode);
+              // Clear awaiting approval when mode changes
+              setAwaitingApprovalRef.current(false);
+            }, 0);
+            break;
+          }
+
+          case 'TODOS_UPDATED': {
+            setTimeout(() => setTodosRef.current(message.todos), 0);
+            break;
+          }
+
+          case 'AGENT_ERROR': {
+            const errorMsg = message.error;
+            setTimeout(() => {
+              setIsLoadingRef.current(false);
+              setMessagesRef.current((prev) => [
+                ...prev,
+                {
+                  id: crypto.randomUUID(),
+                  role: 'assistant' as const,
+                  content: `Error: ${errorMsg}`,
+                },
+              ]);
+            }, 0);
+            break;
+          }
+
+          case 'VFS_STORAGE_CHANGED': {
+            // Firefox fix: relay VFS storage changes from background to trigger sync
+            const vfsChanges = message.changes;
+            console.log(`[Sidebar tab:${thisTabId}] VFS_STORAGE_CHANGED, ${vfsChanges.length} changes`);
+            import('./sync').then(({ getSyncManager }) => {
+              const syncManager = getSyncManager();
+              if (syncManager.getConfig()?.enabled) {
+                // Use the new method that parses changes and triggers direct export
+                syncManager.notifyStorageChanges(vfsChanges);
+              }
+            });
+            break;
+          }
+        }
+      };
+
+      port.onMessage.addListener(messageHandler);
+
+      port.onDisconnect.addListener(() => {
+        console.log(`[Sidebar tab:${thisTabId}] Port disconnected`);
+        portsRef.current.delete(thisTabId);
+      });
+
+      console.log(`[Sidebar tab:${thisTabId}] Port connected`);
+    } else {
+      console.log(`[Sidebar tab:${tabId}] Reusing existing port`);
+    }
+
     portRef.current = port;
 
-    const messageHandler = (message: BackgroundToSidebarMessage) => {
-      console.log(`[Sidebar tab:${tabId}] Received message:`, message.type);
+    // NO cleanup - ports stay alive across tab switches
+    // They will be cleaned up on unmount or when naturally disconnected
+  }, [tabId]);
 
-      switch (message.type) {
-        case 'AGENT_RESPONSE': {
-          console.log(`[Sidebar tab:${tabId}] AGENT_RESPONSE`);
-          const content = message.content;
-          setTimeout(() => {
-            setMessagesRef.current((prev) => {
-              console.log(`[Sidebar tab:${tabId}] setMessages prev:`, prev.length);
-              const lastMessage = prev[prev.length - 1];
-              if (lastMessage?.role === 'assistant') {
-                return [
-                  ...prev.slice(0, -1),
-                  { ...lastMessage, content },
-                ];
-              } else {
-                return [
-                  ...prev,
-                  {
-                    id: crypto.randomUUID(),
-                    role: 'assistant' as const,
-                    content,
-                    toolCalls: [],
-                  },
-                ];
-              }
-            });
-          }, 0);
-          break;
-        }
-
-        case 'TOOL_CALL': {
-          console.log('[Page Editor Sidebar] TOOL_CALL:', message.toolName);
-          const toolName = message.toolName;
-          const toolInput = message.input;
-          const toolId = message.toolCallId;
-          setTimeout(() => {
-            setMessagesRef.current((prev) => {
-              const lastMessage = prev[prev.length - 1];
-              if (lastMessage?.role === 'assistant') {
-                return [
-                  ...prev.slice(0, -1),
-                  {
-                    ...lastMessage,
-                    toolCalls: [
-                      ...(lastMessage.toolCalls || []),
-                      { name: toolName, input: toolInput, id: toolId },
-                    ],
-                  },
-                ];
-              }
-              return prev;
-            });
-          }, 0);
-
-          break;
-        }
-
-        case 'TOOL_RESULT': {
-          const resultToolId = message.toolCallId;
-          const resultData = message.result;
-          setTimeout(() => {
-            setMessagesRef.current((prev) => {
-              const lastMessage = prev[prev.length - 1];
-              if (lastMessage?.role === 'assistant' && lastMessage.toolCalls) {
-                const updatedToolCalls = lastMessage.toolCalls.map((tc) =>
-                  tc.id === resultToolId ? { ...tc, result: resultData } : tc
-                );
-                return [
-                  ...prev.slice(0, -1),
-                  { ...lastMessage, toolCalls: updatedToolCalls },
-                ];
-              }
-              return prev;
-            });
-          }, 0);
-          break;
-        }
-
-        case 'AGENT_DONE': {
-          setTimeout(() => {
-            setIsLoadingRef.current(false);
-            // Check if we're awaiting approval after plan mode completes
-            browser.runtime.sendMessage({ type: 'GET_MODE', tabId }).then((response) => {
-              setAwaitingApprovalRef.current(response.awaitingApproval || false);
-            });
-          }, 0);
-          break;
-        }
-
-        case 'MODE_CHANGED': {
-          setTimeout(() => {
-            setModeRef.current(message.mode);
-            // Clear awaiting approval when mode changes
-            setAwaitingApprovalRef.current(false);
-          }, 0);
-          break;
-        }
-
-        case 'TODOS_UPDATED': {
-          setTimeout(() => setTodosRef.current(message.todos), 0);
-          break;
-        }
-
-        case 'AGENT_ERROR': {
-          const errorMsg = message.error;
-          setTimeout(() => {
-            setIsLoadingRef.current(false);
-            setMessagesRef.current((prev) => [
-              ...prev,
-              {
-                id: crypto.randomUUID(),
-                role: 'assistant' as const,
-                content: `Error: ${errorMsg}`,
-              },
-            ]);
-          }, 0);
-          break;
+  // Cleanup all ports on unmount only
+  useEffect(() => {
+    return () => {
+      console.log('[Sidebar] Unmounting, disconnecting all ports');
+      for (const port of portsRef.current.values()) {
+        try {
+          port.disconnect();
+        } catch (e) {
+          // Ignore errors during cleanup
         }
       }
+      portsRef.current.clear();
     };
-
-    port.onMessage.addListener(messageHandler);
-
-    port.onDisconnect.addListener(() => {
-      console.log(`[Sidebar tab:${tabId}] Port disconnected`);
-    });
-
-    console.log(`[Sidebar tab:${tabId}] Port connected`);
-
-    return () => {
-      port.disconnect();
-    };
-  }, [tabId]);
+  }, []);
 
   // Re-fetch history and URL when tab changes
   useEffect(() => {

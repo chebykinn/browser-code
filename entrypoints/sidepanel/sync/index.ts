@@ -13,6 +13,7 @@ import type {
   SyncResult,
   ConflictInfo,
   BrowserType,
+  DownloadResult,
 } from './types';
 import { detectBrowser, hasFileSystemAccess } from './types';
 import { readLocalFile, listAllFiles, computeHash } from './file-reader';
@@ -56,6 +57,14 @@ export class SyncManager {
   private listeners: Map<SyncEventType, Set<SyncEventCallback>> = new Map();
   private syncInProgress = false;
 
+  // Debouncing state for VFS changes
+  private pendingVfsChanges: VfsFileState[] = [];
+  private vfsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly VFS_DEBOUNCE_MS = 500;
+
+  // Firefox periodic sync fallback (in case onChanged relay fails)
+  private firefoxSyncInterval: ReturnType<typeof setInterval> | null = null;
+
   constructor() {
     this.browser = detectBrowser();
   }
@@ -86,9 +95,9 @@ export class SyncManager {
       }
     }
 
-    // Update state based on config
+    // Auto-start sync if it was previously enabled
     if (this.config?.enabled) {
-      this.state.status = 'idle';
+      await this.startSync();
     }
   }
 
@@ -178,13 +187,27 @@ export class SyncManager {
     this.vfsWatcher = new VfsWatcher((changes) => this.handleVfsChanges(changes));
     this.vfsWatcher.start();
 
+    // Firefox: Start periodic sync as fallback
+    // Firefox MV3 doesn't reliably fire storage.onChanged cross-context
+    if (this.browser === 'firefox') {
+      const FIREFOX_SYNC_INTERVAL = 5000; // 5 seconds
+      this.firefoxSyncInterval = setInterval(async () => {
+        const result = await this.syncNow();
+        console.log(`[Sync] Periodic: ${result.synced} synced, ${result.errors.length} errors`);
+      }, FIREFOX_SYNC_INTERVAL);
+    }
+
     this.setState({ status: 'idle', error: null });
 
     // Cleanup duplicate paths before initial export
     await this.cleanupDuplicatePaths();
 
     // Initial sync: export all existing VFS files
-    await this.initialExport();
+    // Skip on Firefox - the Downloads API crashes on bulk exports during init
+    // The periodic sync will pick up files gradually
+    if (this.browser !== 'firefox') {
+      await this.initialExport();
+    }
   }
 
   /**
@@ -282,19 +305,38 @@ export class SyncManager {
       }
 
       // Export all VFS files to local
+      let successCount = 0;
+      let errorCount = 0;
+      const errors: string[] = [];
+
       for (const vfs of vfsFiles) {
-        try {
-          await this.syncVfsToLocal(vfs);
+        const result = await this.syncVfsToLocal(vfs);
+        if (result.success) {
+          successCount++;
           const path = normalizePath(vfs.domain, vfs.urlPath, vfs.type, vfs.name);
           this.updateFileMetadata(path, computeHash(vfs.content), vfs.version);
-        } catch (error) {
-          console.error(`[Sync] Failed to export ${vfs.name}:`, error);
+        } else {
+          errorCount++;
+          const errorMsg = `Failed to export ${vfs.name}: ${result.error || 'Unknown error'}`;
+          errors.push(errorMsg);
+          console.error(`[Sync] ${errorMsg}`);
         }
       }
 
       await this.saveMetadata();
-      this.setState({ status: 'idle', lastSync: Date.now(), pendingChanges: 0 });
-      this.emit('sync-complete', { success: true, synced: vfsFiles.length, conflicts: [], errors: [] });
+
+      if (errorCount > 0) {
+        this.setState({
+          status: 'idle',
+          lastSync: Date.now(),
+          pendingChanges: 0,
+          error: `${errorCount} file(s) failed to sync`,
+        });
+        this.emit('sync-complete', { success: false, synced: successCount, conflicts: [], errors });
+      } else {
+        this.setState({ status: 'idle', lastSync: Date.now(), pendingChanges: 0, error: null });
+        this.emit('sync-complete', { success: true, synced: successCount, conflicts: [], errors: [] });
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.setState({ status: 'error', error: errorMessage });
@@ -317,6 +359,19 @@ export class SyncManager {
       this.vfsWatcher.stop();
       this.vfsWatcher = null;
     }
+
+    // Clear Firefox periodic sync interval
+    if (this.firefoxSyncInterval) {
+      clearInterval(this.firefoxSyncInterval);
+      this.firefoxSyncInterval = null;
+    }
+
+    // Clear debounce timer
+    if (this.vfsDebounceTimer) {
+      clearTimeout(this.vfsDebounceTimer);
+      this.vfsDebounceTimer = null;
+    }
+    this.pendingVfsChanges = [];
 
     this.setState({ status: 'disabled' });
   }
@@ -432,13 +487,13 @@ export class SyncManager {
 
     // Sync VFS → local (both browsers)
     for (const vfs of changes.vfsChanges) {
-      try {
-        await this.syncVfsToLocal(vfs);
+      const syncResult = await this.syncVfsToLocal(vfs);
+      if (syncResult.success) {
         result.synced++;
         const path = normalizePath(vfs.domain, vfs.urlPath, vfs.type, vfs.name);
         this.updateFileMetadata(path, computeHash(vfs.content), vfs.version);
-      } catch (error) {
-        result.errors.push(`Failed to sync ${vfs.name}: ${(error as Error).message}`);
+      } else {
+        result.errors.push(`Failed to sync ${vfs.name}: ${syncResult.error || 'Unknown error'}`);
       }
     }
 
@@ -470,14 +525,22 @@ export class SyncManager {
 
   /**
    * Sync a VFS file to local
+   * @returns DownloadResult for Firefox, or success object for Chrome
    */
-  private async syncVfsToLocal(vfs: VfsFileState): Promise<void> {
+  private async syncVfsToLocal(vfs: VfsFileState): Promise<{ success: boolean; error?: string }> {
     const relativePath = normalizePath(vfs.domain, vfs.urlPath, vfs.type, vfs.name);
 
     if (this.browser === 'chrome' && this.config?.directoryHandle) {
-      await chromeWriter.writeFile(this.config.directoryHandle, relativePath, vfs.content);
+      try {
+        await chromeWriter.writeFile(this.config.directoryHandle, relativePath, vfs.content);
+        return { success: true };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Chrome write failed';
+        return { success: false, error: errorMessage };
+      }
     } else {
-      await firefoxWriter.writeFile(relativePath, vfs.content);
+      const result: DownloadResult = await firefoxWriter.writeFile(relativePath, vfs.content);
+      return { success: result.success, error: result.error };
     }
   }
 
@@ -494,29 +557,158 @@ export class SyncManager {
   }
 
   /**
-   * Handle VFS changes
+   * Handle VFS storage changes relayed from background script (Firefox fix).
+   * Parses raw storage changes into VfsFileState and triggers sync.
+   */
+  notifyStorageChanges(changes: Array<{ key: string; newValue?: unknown; oldValue?: unknown }>): void {
+    const vfsChanges: VfsFileState[] = [];
+
+    for (const change of changes) {
+      if (!change.key.startsWith('vfs:')) continue;
+
+      const domain = change.key.replace('vfs:', '');
+      const newValue = change.newValue as any;
+      const oldValue = change.oldValue as any;
+
+      if (newValue?.paths) {
+        for (const [urlPath, pathData] of Object.entries(newValue.paths as Record<string, any>)) {
+          const oldPathData = oldValue?.paths?.[urlPath] as Record<string, any> | undefined;
+
+          // Check scripts
+          if (pathData.scripts) {
+            for (const [name, file] of Object.entries(pathData.scripts as Record<string, any>)) {
+              const oldFile = oldPathData?.scripts?.[name] as { version?: number } | undefined;
+              if (!oldFile || oldFile.version !== file.version) {
+                vfsChanges.push({
+                  domain,
+                  urlPath,
+                  type: 'scripts',
+                  name,
+                  content: file.content,
+                  version: file.version,
+                  modified: file.modified || Date.now(),
+                });
+              }
+            }
+          }
+
+          // Check styles
+          if (pathData.styles) {
+            for (const [name, file] of Object.entries(pathData.styles as Record<string, any>)) {
+              const oldFile = oldPathData?.styles?.[name] as { version?: number } | undefined;
+              if (!oldFile || oldFile.version !== file.version) {
+                vfsChanges.push({
+                  domain,
+                  urlPath,
+                  type: 'styles',
+                  name,
+                  content: file.content,
+                  version: file.version,
+                  modified: file.modified || Date.now(),
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (vfsChanges.length > 0) {
+      console.log('[Sync] Syncing', vfsChanges.length, 'file(s)');
+      this.handleVfsChanges(vfsChanges);
+    }
+  }
+
+  /**
+   * Handle VFS changes with debouncing
    */
   private async handleVfsChanges(changes: VfsFileState[]): Promise<void> {
     if (!this.config?.enabled || changes.length === 0) {
       return;
     }
 
-    this.setState({ pendingChanges: this.state.pendingChanges + changes.length });
+    // Accumulate changes for debouncing
+    for (const change of changes) {
+      // Deduplicate by path - keep latest version
+      const path = normalizePath(change.domain, change.urlPath, change.type, change.name);
+      const existingIndex = this.pendingVfsChanges.findIndex(
+        (c) => normalizePath(c.domain, c.urlPath, c.type, c.name) === path
+      );
+      if (existingIndex >= 0) {
+        this.pendingVfsChanges[existingIndex] = change;
+      } else {
+        this.pendingVfsChanges.push(change);
+      }
+    }
+
+    this.setState({ pendingChanges: this.pendingVfsChanges.length });
+
+    // Clear existing debounce timer
+    if (this.vfsDebounceTimer) {
+      clearTimeout(this.vfsDebounceTimer);
+    }
+
+    // Set new debounce timer
+    this.vfsDebounceTimer = setTimeout(() => {
+      this.processVfsChanges();
+    }, this.VFS_DEBOUNCE_MS);
+  }
+
+  /**
+   * Process accumulated VFS changes after debounce delay
+   */
+  private async processVfsChanges(): Promise<void> {
+    const changesToProcess = [...this.pendingVfsChanges];
+    this.pendingVfsChanges = [];
+    this.vfsDebounceTimer = null;
+
+    if (changesToProcess.length === 0) {
+      return;
+    }
 
     // Firefox: directly export changed files (no local file reading)
     if (this.browser === 'firefox') {
-      for (const vfs of changes) {
-        try {
-          await this.syncVfsToLocal(vfs);
+      let successCount = 0;
+      let errorCount = 0;
+      const errors: string[] = [];
+
+      for (const vfs of changesToProcess) {
+        const result = await this.syncVfsToLocal(vfs);
+        if (result.success) {
+          successCount++;
           const path = normalizePath(vfs.domain, vfs.urlPath, vfs.type, vfs.name);
           this.updateFileMetadata(path, computeHash(vfs.content), vfs.version);
-        } catch (error) {
-          console.error(`[Sync] Failed to export ${vfs.name}:`, error);
+        } else {
+          errorCount++;
+          const errorMsg = `Failed to export ${vfs.name}: ${result.error || 'Unknown error'}`;
+          errors.push(errorMsg);
+          console.error(`[Sync] ${errorMsg}`);
         }
       }
-      this.setState({
-        pendingChanges: 0,
-        lastSync: Date.now(),
+
+      await this.saveMetadata();
+
+      // Update state with results
+      if (errorCount > 0) {
+        this.setState({
+          pendingChanges: 0,
+          lastSync: Date.now(),
+          error: `${errorCount} file(s) failed to sync`,
+        });
+        this.emit('error', { error: `${errorCount} file(s) failed to sync`, errors });
+      } else {
+        this.setState({
+          pendingChanges: 0,
+          lastSync: Date.now(),
+          error: null,
+        });
+      }
+
+      this.emit('sync-complete', {
+        success: errorCount === 0,
+        synced: successCount,
+        conflicts: [],
+        errors,
       });
       return;
     }
