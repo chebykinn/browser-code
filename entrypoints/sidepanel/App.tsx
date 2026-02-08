@@ -34,6 +34,7 @@ export function App() {
   const [mode, setMode] = useState<AgentMode>('plan');
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   type Port = ReturnType<typeof browser.runtime.connect>;
   const portRef = useRef<Port | null>(null);
@@ -480,12 +481,20 @@ export function App() {
   };
 
   const handleSaveSettings = async (newSettings: Partial<Settings>) => {
-    const response = await browser.runtime.sendMessage({
-      type: 'SAVE_SETTINGS',
-      settings: newSettings,
-    });
-    setSettings(response);
-    setShowSettings(false);
+    try {
+      const response = await browser.runtime.sendMessage({
+        type: 'SAVE_SETTINGS',
+        settings: newSettings,
+      });
+      if (response?.error) {
+        throw new Error(response.error);
+      }
+      setSettings(response);
+      setShowSettings(false);
+    } catch (error) {
+      console.error('[Settings] Failed to save:', error);
+      setSaveError(error instanceof Error ? error.message : 'Failed to save settings');
+    }
   };
 
   const handleNewChat = async () => {
@@ -552,8 +561,9 @@ export function App() {
     return (
       <SettingsPanel
         settings={settings}
-        onSave={handleSaveSettings}
-        onClose={() => setShowSettings(false)}
+        onSave={(s) => { setSaveError(null); handleSaveSettings(s); }}
+        onClose={() => { setSaveError(null); setShowSettings(false); }}
+        error={saveError}
       />
     );
   }

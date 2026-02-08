@@ -445,6 +445,13 @@ body {
   cursor: not-allowed;
 }
 
+.settings-error {
+  color: #ff6b6b;
+  font-size: 13px;
+  margin: 0;
+  padding: 0 4px;
+}
+
 /* Panel shared styles */
 .panel {
   height: 100vh;

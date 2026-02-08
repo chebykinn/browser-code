@@ -5,12 +5,13 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: 'Browser Code',
     description: 'Edit web pages with AI assistance - Claude Code for the browser',
-    version: '0.1.1',
+    version: '0.1.2',
     permissions: [
       'storage',
       'activeTab',
       'scripting',
       'downloads',
+      'alarms',
       // Chrome: userScripts is install-time permission
       // Firefox: userScripts must be in optional_permissions
       ...(browser === 'chrome' ? ['sidePanel', 'userScripts'] : []),

@@ -6,9 +6,10 @@ interface SettingsPanelProps {
   settings: Settings | null;
   onSave: (settings: Partial<Settings>) => void;
   onClose: () => void;
+  error?: string | null;
 }
 
-export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ settings, onSave, onClose, error }: SettingsPanelProps) {
   const [apiKey, setApiKey] = useState(settings?.apiKey || '');
   const [model, setModel] = useState(settings?.model || 'claude-opus-4-5-20251101');
 
@@ -73,17 +74,13 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
     onSave({ apiKey, model });
   };
 
-  const canClose = settings?.apiKey;
-
   return (
     <div className="settings-panel">
       <header className="settings-header">
         <h2>Settings</h2>
-        {canClose && (
-          <button className="close-button" onClick={onClose}>
-            ✕
-          </button>
-        )}
+        <button className="close-button" onClick={onClose}>
+          ✕
+        </button>
       </header>
 
       <form className="settings-form" onSubmit={handleSubmit}>
@@ -124,6 +121,7 @@ export function SettingsPanel({ settings, onSave, onClose }: SettingsPanelProps)
         <button type="submit" className="save-button" disabled={!apiKey}>
           Save Settings
         </button>
+        {error && <p className="settings-error">{error}</p>}
       </form>
 
       <div className="settings-divider" />
