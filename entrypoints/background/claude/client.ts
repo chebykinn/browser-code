@@ -3,6 +3,7 @@ import { SYSTEM_PROMPT } from './tools';
 import { PLAN_MODE_TOOLS, EXECUTE_MODE_TOOLS, PLAN_MODE_SYSTEM_PROMPT } from './plan-tools';
 import type { Message, AssistantContent, ToolResultContent, AgentMode, TodoItem, TextContent, ImageContent } from '@/lib/types/messages';
 import type { ReadResult } from '@/lib/types/tools';
+import { getToolRiskLevel } from '@/lib/types/tools';
 
 const MAX_TURNS = 500;
 
@@ -13,11 +14,17 @@ export interface AgentCallbacks {
   onDone: () => void;
   onError: (error: string) => void;
   onTodosUpdated?: (todos: TodoItem[]) => void;
+  /** If provided, called before executing mutating/dangerous tools. Returns true if approved. */
+  requestApproval?: (toolName: string, input: unknown, toolCallId: string) => Promise<boolean>;
 }
 
 export interface AgentOptions {
   apiKey: string;
   model?: string;
+  /** Override the Anthropic API base URL. Used in tests to point to a mock server.
+   * @example "http://localhost:4242"
+   */
+  baseURL?: string;
   tabId: number;
   history: Message[];
   callbacks: AgentCallbacks;
@@ -37,6 +44,7 @@ export async function runAgent(
   const {
     apiKey,
     model = 'claude-opus-4-5-20251101',
+    baseURL,
     tabId,
     history,
     callbacks,
@@ -61,6 +69,7 @@ export async function runAgent(
   const anthropic = new Anthropic({
     apiKey,
     dangerouslyAllowBrowser: true, // Required for extension context
+    ...(baseURL && { baseURL }),
   });
 
   // Add new user message to history
@@ -139,6 +148,22 @@ export async function runAgent(
 
         console.log('[Page Editor] Executing tool:', call.name, call.input);
         callbacks.onToolCall(call.name, call.input, call.id);
+
+        // Check tool risk level and request approval for non-safe tools
+        const riskLevel = getToolRiskLevel(call.name);
+        if (riskLevel !== 'safe' && callbacks.requestApproval) {
+          const approved = await callbacks.requestApproval(call.name, call.input, call.id);
+          if (!approved) {
+            console.log('[Page Editor] Tool call denied by user:', call.name);
+            callbacks.onToolResult(call.id, { error: 'User denied this tool call.' });
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: call.id,
+              content: JSON.stringify({ error: 'User denied this tool call.' }),
+            });
+            continue;
+          }
+        }
 
         try {
           let toolResult: unknown;

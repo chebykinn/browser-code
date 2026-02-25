@@ -1356,6 +1356,145 @@ body {
   background: #333;
 }
 
+/* Tool approval cards */
+.tool-approval {
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #444;
+}
+
+.tool-approval.mutating {
+  background: #2a2a1a;
+  border-color: #5a5a2d;
+}
+
+.tool-approval.dangerous {
+  background: #2a1a1a;
+  border: 2px solid #8b2d2d;
+}
+
+.tool-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tool-approval-header .tool-name {
+  flex: 1;
+}
+
+.tool-approval-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+}
+
+.tool-approval.mutating .tool-approval-badge {
+  background: #5a5a2d;
+  color: #d4d4a0;
+}
+
+.tool-approval.dangerous .tool-approval-badge {
+  background: #8b2d2d;
+  color: #ffaaaa;
+}
+
+.tool-approval-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.tool-approve-button {
+  flex: 1;
+  padding: 8px 12px;
+  background: #2d5a3d;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tool-approve-button:hover {
+  background: #3d6a4d;
+}
+
+.tool-deny-button {
+  flex: 1;
+  padding: 8px 12px;
+  background: #5a2d2d;
+  color: #e0e0e0;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tool-deny-button:hover {
+  background: #6a3d3d;
+}
+
+/* Tool input preview (inside approval cards) */
+.tool-input-preview {
+  margin-top: 4px;
+}
+
+.tool-input-label {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.tool-input-label code {
+  background: #1a1a1a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 11px;
+  color: #b0b0b0;
+}
+
+.tool-input-code {
+  background: #1a1a1a;
+  padding: 8px;
+  border-radius: 4px;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  color: #c0c0c0;
+  border: 1px solid #333;
+}
+
+.tool-approval.dangerous .tool-input-code {
+  border-color: #5a2d2d;
+}
+
+.tool-input-diff {
+  color: #c0c0c0;
+}
+
+/* Pending approvals container */
+.pending-approvals {
+  padding: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Disabled file item */
 .file-item.disabled {
   opacity: 0.5;

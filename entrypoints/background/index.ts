@@ -11,6 +11,7 @@ import type {
   AgentMode,
   TodoItem,
 } from '@/lib/types/messages';
+import { getToolRiskLevel } from '@/lib/types/tools';
 
 import type { Message } from '@/lib/types/messages';
 import { getConsoleInterceptorFunction } from '../content/console/interceptor';
@@ -153,6 +154,51 @@ const tabTodos = new Map<number, TodoItem[]>();
 // Track if agent is awaiting plan approval per tab
 const awaitingPlanApproval = new Map<number, boolean>();
 
+// Pending tool approval promises: toolCallId → { resolve, tabId }
+const pendingToolApprovals = new Map<string, { resolve: (approved: boolean) => void; tabId: number }>();
+
+/**
+ * Request user approval for a tool call. Sends a TOOL_APPROVAL_REQUEST to the
+ * sidebar and returns a Promise that resolves when the user responds.
+ * Auto-denies if the abort signal fires while waiting.
+ */
+function requestToolApproval(
+  tabId: number,
+  toolName: string,
+  input: unknown,
+  toolCallId: string,
+  abortSignal?: AbortSignal,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    // If already aborted, deny immediately
+    if (abortSignal?.aborted) {
+      resolve(false);
+      return;
+    }
+
+    pendingToolApprovals.set(toolCallId, { resolve, tabId });
+
+    // Send approval request to sidebar via port
+    const port = sidebarPorts.get(tabId);
+    sendToSidebar(port, {
+      type: 'TOOL_APPROVAL_REQUEST',
+      toolCallId,
+      toolName,
+      input,
+      riskLevel: getToolRiskLevel(toolName),
+    });
+
+    // Auto-deny on abort (e.g. user clicks Stop)
+    const onAbort = () => {
+      if (pendingToolApprovals.has(toolCallId)) {
+        pendingToolApprovals.delete(toolCallId);
+        resolve(false);
+      }
+    };
+    abortSignal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 // Reference counter for keep-alive management
 let activeAgentCount = 0;
 
@@ -258,6 +304,10 @@ async function handleMessage(
         return { error: 'API key not configured. Please set your Anthropic API key in settings.' };
       }
 
+      // Allow tests to redirect API calls to a local mock server
+      const testConfig = await browser.storage.local.get('_testBaseURL');
+      const baseURL = testConfig['_testBaseURL'] as string | undefined;
+
       const tabId = message.tabId;
       console.log('[Page Editor] CHAT_MESSAGE received, tabId:', tabId);
 
@@ -290,6 +340,7 @@ async function handleMessage(
       await runAgent(message.content, {
         apiKey: settings.apiKey,
         model: settings.model,
+        baseURL,
         tabId,
         history,
         abortSignal: abortController.signal,
@@ -345,6 +396,8 @@ async function handleMessage(
             const currentPort = sidebarPorts.get(tabId);
             sendToSidebar(currentPort, { type: 'AGENT_ERROR', error });
           },
+          requestApproval: (toolName, input, toolCallId) =>
+            requestToolApproval(tabId, toolName, input, toolCallId, abortController.signal),
         },
       });
 
@@ -359,6 +412,19 @@ async function handleMessage(
         controller.abort();
         activeAgents.delete(tabId);
         await decrementActiveAgents();
+      }
+      return { success: true };
+    }
+
+    case 'TOOL_APPROVAL_RESPONSE': {
+      const { toolCallId, approved } = message;
+      const pending = pendingToolApprovals.get(toolCallId);
+      if (pending) {
+        console.log('[Page Editor] Tool approval response:', toolCallId, approved);
+        pendingToolApprovals.delete(toolCallId);
+        pending.resolve(approved);
+      } else {
+        console.warn('[Page Editor] No pending approval for toolCallId:', toolCallId);
       }
       return { success: true };
     }
@@ -495,6 +561,8 @@ async function handleMessage(
               const port = sidebarPorts.get(tabId);
               sendToSidebar(port, { type: 'AGENT_ERROR', error });
             },
+            requestApproval: (toolName, input, toolCallId) =>
+              requestToolApproval(tabId, toolName, input, toolCallId, abortController.signal),
           },
         });
       }
@@ -562,6 +630,8 @@ async function handleMessage(
                 const port = sidebarPorts.get(tabId);
                 sendToSidebar(port, { type: 'AGENT_ERROR', error });
               },
+              requestApproval: (toolName, input, toolCallId) =>
+                requestToolApproval(tabId, toolName, input, toolCallId, abortController.signal),
             },
           });
         }

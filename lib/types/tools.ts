@@ -159,3 +159,27 @@ export type ToolResult =
   | BashResult
   | LsResult
   | ScreenshotResult;
+
+// Tool risk classification for approval gate
+export type ToolRiskLevel = 'safe' | 'mutating' | 'dangerous';
+
+const TOOL_RISK_MAP: Record<string, ToolRiskLevel> = {
+  Read: 'safe',
+  Glob: 'safe',
+  Grep: 'safe',
+  GrepCount: 'safe',
+  Ls: 'safe',
+  Screenshot: 'safe',
+  TodoRead: 'safe',
+  TodoWrite: 'safe',
+  Write: 'mutating',
+  Edit: 'mutating',
+  Bash: 'dangerous',
+};
+
+/**
+ * Get the risk level for a tool. Unknown tools default to 'dangerous'.
+ */
+export function getToolRiskLevel(toolName: string): ToolRiskLevel {
+  return TOOL_RISK_MAP[toolName] ?? 'dangerous';
+}
