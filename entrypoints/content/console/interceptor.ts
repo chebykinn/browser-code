@@ -48,7 +48,7 @@ export const CONSOLE_INTERCEPTOR_CODE = `
     if (logs.length > MAX_LOGS) logs.shift();
 
     // Notify content script
-    window.postMessage({ type: '__BROWSER_CODE_CONSOLE__', entry }, '*');
+    window.postMessage({ type: '__BROWSER_CODE_CONSOLE__', entry }, window.location.origin);
   }
 
   console.log = function(...args) { capture('log', args); return originalConsole.log(...args); };
@@ -104,7 +104,7 @@ export function getConsoleInterceptorFunction(): () => void {
       if (logs.length > MAX_LOGS) logs.shift();
 
       // Notify content script
-      window.postMessage({ type: '__BROWSER_CODE_CONSOLE__', entry }, '*');
+      window.postMessage({ type: '__BROWSER_CODE_CONSOLE__', entry }, window.location.origin);
     }
 
     console.log = function(...args: unknown[]) { capture('log', args); return originalConsole.log(...args); };
