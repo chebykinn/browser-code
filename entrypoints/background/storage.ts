@@ -1,9 +1,17 @@
 import type { Settings, SavedEdit, URLPattern } from '@/lib/types/messages';
+import { encrypt, decrypt, isEncryptedValue } from '@/lib/crypto';
 
 const SETTINGS_KEY = 'settings';
 const EDITS_KEY = 'edits';
 
-// Default settings
+/** Raw shape of the settings object in browser.storage.local.
+ *  The apiKey field may be a plaintext string (legacy) or an EncryptedValue. */
+interface StoredSettings {
+  apiKey: string | import('@/lib/crypto').EncryptedValue;
+  model: string;
+  enabled: boolean;
+}
+
 const DEFAULT_SETTINGS: Settings = {
   apiKey: '',
   model: 'claude-opus-4-5-20251101',
@@ -11,21 +19,58 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 /**
- * Get extension settings
+ * Get extension settings.
+ * Transparently decrypts the API key. If a legacy plaintext key is found,
+ * it is encrypted in-place (migration).
  */
 export async function getSettings(): Promise<Settings> {
   const result = await browser.storage.local.get(SETTINGS_KEY);
-  const stored = result[SETTINGS_KEY] as Partial<Settings> | undefined;
-  return { ...DEFAULT_SETTINGS, ...stored };
+  const stored = result[SETTINGS_KEY] as Partial<StoredSettings> | undefined;
+
+  if (!stored) return { ...DEFAULT_SETTINGS };
+
+  let apiKey = '';
+
+  if (isEncryptedValue(stored.apiKey)) {
+    apiKey = await decrypt(stored.apiKey, browser.runtime.id);
+  } else if (typeof stored.apiKey === 'string' && stored.apiKey !== '') {
+    // Legacy plaintext key — encrypt it in-place for future reads
+    apiKey = stored.apiKey;
+    const encrypted = await encrypt(apiKey, browser.runtime.id);
+    await browser.storage.local.set({
+      [SETTINGS_KEY]: { ...stored, apiKey: encrypted },
+    });
+  }
+
+  return {
+    ...DEFAULT_SETTINGS,
+    model: stored.model ?? DEFAULT_SETTINGS.model,
+    enabled: stored.enabled ?? DEFAULT_SETTINGS.enabled,
+    apiKey,
+  };
 }
 
 /**
- * Save extension settings
+ * Save extension settings.
+ * Encrypts the API key before writing to storage.
  */
 export async function saveSettings(settings: Partial<Settings>): Promise<Settings> {
   const current = await getSettings();
   const updated = { ...current, ...settings };
-  await browser.storage.local.set({ [SETTINGS_KEY]: updated });
+
+  // Build the storage payload, encrypting the API key
+  const toStore: Partial<StoredSettings> = {
+    model: updated.model,
+    enabled: updated.enabled,
+  };
+
+  if (updated.apiKey) {
+    toStore.apiKey = await encrypt(updated.apiKey, browser.runtime.id);
+  } else {
+    toStore.apiKey = '';
+  }
+
+  await browser.storage.local.set({ [SETTINGS_KEY]: toStore });
   return updated;
 }
 
