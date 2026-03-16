@@ -132,6 +132,65 @@ function ToolCallDisplay({ toolCall }: { toolCall: ToolCall }) {
 }
 
 /**
+ * Renders a contextual preview of a tool's input for the approval UI.
+ * - Bash: shows the command/code
+ * - Write: shows file path + truncated content
+ * - Edit: shows file path + diff-style old/new
+ */
+export function ToolInputPreview({ toolName, input }: { toolName: string; input: unknown }) {
+  const data = input as Record<string, unknown> | null;
+
+  if (toolName === 'Bash') {
+    const command = data?.command ?? data?.script ?? '';
+    return (
+      <div className="tool-input-preview">
+        <div className="tool-input-label">Command</div>
+        <pre className="tool-input-code">{String(command)}</pre>
+      </div>
+    );
+  }
+
+  if (toolName === 'Write') {
+    const path = data?.path ?? data?.file_path ?? '';
+    const content = String(data?.content ?? '');
+    const MAX_PREVIEW = 500;
+    const truncated = content.length > MAX_PREVIEW
+      ? content.slice(0, MAX_PREVIEW) + `\n... (${content.length - MAX_PREVIEW} more chars)`
+      : content;
+    return (
+      <div className="tool-input-preview">
+        <div className="tool-input-label">Write to <code>{String(path)}</code></div>
+        <pre className="tool-input-code">{truncated}</pre>
+      </div>
+    );
+  }
+
+  if (toolName === 'Edit') {
+    const path = data?.path ?? data?.file_path ?? '';
+    const oldStr = String(data?.old_string ?? '');
+    const newStr = String(data?.new_string ?? '');
+    return (
+      <div className="tool-input-preview">
+        <div className="tool-input-label">Edit <code>{String(path)}</code></div>
+        <pre className="tool-input-code tool-input-diff">
+          {oldStr.split('\n').map(l => `- ${l}`).join('\n')}
+          {'\n'}
+          {newStr.split('\n').map(l => `+ ${l}`).join('\n')}
+        </pre>
+      </div>
+    );
+  }
+
+  // Fallback for unknown tools
+  return (
+    <div className="tool-input-preview">
+      <div className="tool-input-label">{toolName}</div>
+      <pre className="tool-input-code">{JSON.stringify(input, null, 2)}</pre>
+    </div>
+  );
+}
+
+/**
  * Simple markdown renderer for plan display
  */
 function SimpleMarkdown({ content }: { content: string }) {

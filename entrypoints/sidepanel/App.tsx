@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { ChatMessage } from './components/ChatMessage';
+import { ChatMessage, ToolInputPreview } from './components/ChatMessage';
 import { SettingsPanel } from './components/SettingsPanel';
 import { ScriptsPanel } from './components/ScriptsPanel';
 import type {
@@ -9,6 +9,7 @@ import type {
   AgentMode,
   TodoItem,
 } from '@/lib/types/messages';
+import type { ToolRiskLevel } from '@/lib/types/tools';
 
 interface Message {
   id: string;
@@ -20,6 +21,13 @@ interface Message {
     id: string;
     result?: unknown;
   }>;
+}
+
+interface PendingApproval {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  riskLevel: ToolRiskLevel;
 }
 
 export function App() {
@@ -34,6 +42,7 @@ export function App() {
   const [mode, setMode] = useState<AgentMode>('plan');
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   type Port = ReturnType<typeof browser.runtime.connect>;
@@ -50,11 +59,13 @@ export function App() {
   const setModeRef = useRef(setMode);
   const setTodosRef = useRef(setTodos);
   const setAwaitingApprovalRef = useRef(setAwaitingApproval);
+  const setPendingApprovalsRef = useRef(setPendingApprovals);
   setMessagesRef.current = setMessages;
   setIsLoadingRef.current = setIsLoading;
   setModeRef.current = setMode;
   setTodosRef.current = setTodos;
   setAwaitingApprovalRef.current = setAwaitingApproval;
+  setPendingApprovalsRef.current = setPendingApprovals;
 
   // Keep tabIdRef in sync with state
   useEffect(() => {
@@ -275,6 +286,7 @@ export function App() {
           case 'AGENT_DONE': {
             setTimeout(() => {
               setIsLoadingRef.current(false);
+              setPendingApprovalsRef.current([]);
               // Check if we're awaiting approval after plan mode completes
               browser.runtime.sendMessage({ type: 'GET_MODE', tabId: thisTabId }).then((response) => {
                 setAwaitingApprovalRef.current(response.awaitingApproval || false);
@@ -301,6 +313,7 @@ export function App() {
             const errorMsg = message.error;
             setTimeout(() => {
               setIsLoadingRef.current(false);
+              setPendingApprovalsRef.current([]);
               setMessagesRef.current((prev) => [
                 ...prev,
                 {
@@ -308,6 +321,18 @@ export function App() {
                   role: 'assistant' as const,
                   content: `Error: ${errorMsg}`,
                 },
+              ]);
+            }, 0);
+            break;
+          }
+
+          case 'TOOL_APPROVAL_REQUEST': {
+            const { toolCallId, toolName, input: toolInput, riskLevel } = message;
+            console.log(`[Sidebar tab:${thisTabId}] TOOL_APPROVAL_REQUEST:`, toolName, toolCallId);
+            setTimeout(() => {
+              setPendingApprovalsRef.current((prev) => [
+                ...prev,
+                { toolCallId, toolName, input: toolInput, riskLevel },
               ]);
             }, 0);
             break;
@@ -542,6 +567,18 @@ export function App() {
     setAwaitingApproval(false);
   };
 
+  const handleToolApproval = async (toolCallId: string, approved: boolean) => {
+    // Remove from pending list
+    setPendingApprovals((prev) => prev.filter((a) => a.toolCallId !== toolCallId));
+    // Send response to background
+    await browser.runtime.sendMessage({
+      type: 'TOOL_APPROVAL_RESPONSE',
+      toolCallId,
+      approved,
+      tabId,
+    });
+  };
+
   const handleToggleMode = async () => {
     if (!tabId || isLoading) return;
     const newMode = mode === 'plan' ? 'execute' : 'plan';
@@ -646,6 +683,36 @@ export function App() {
         <div ref={messagesEndRef} />
       </div>
 
+      {pendingApprovals.length > 0 && (
+        <div className="pending-approvals">
+          {pendingApprovals.map((approval) => (
+            <div key={approval.toolCallId} className={`tool-approval ${approval.riskLevel}`}>
+              <div className="tool-approval-header">
+                <span className="tool-approval-badge">
+                  {approval.riskLevel === 'dangerous' ? 'WARNING' : 'REVIEW'}
+                </span>
+                <span className="tool-name">{approval.toolName}</span>
+              </div>
+              <ToolInputPreview toolName={approval.toolName} input={approval.input} />
+              <div className="tool-approval-buttons">
+                <button
+                  className="tool-approve-button"
+                  onClick={() => handleToolApproval(approval.toolCallId, true)}
+                >
+                  Approve
+                </button>
+                <button
+                  className="tool-deny-button"
+                  onClick={() => handleToolApproval(approval.toolCallId, false)}
+                >
+                  Deny
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {awaitingApproval && !isLoading && (
         <div className="plan-approval">
           <div className="plan-approval-buttons">
@@ -661,6 +728,7 @@ export function App() {
 
       <form className="input-form" onSubmit={handleSubmit}>
         <input
+          data-testid="chat-input"
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -668,11 +736,11 @@ export function App() {
           disabled={!tabId}
         />
         {isLoading ? (
-          <button type="button" onClick={handleStop} className="stop-button">
+          <button type="button" onClick={handleStop} className="stop-button" data-testid="stop-button">
             Stop
           </button>
         ) : (
-          <button type="submit" disabled={!input.trim() || !tabId}>
+          <button type="submit" disabled={!input.trim() || !tabId} data-testid="send-button">
             Send
           </button>
         )}

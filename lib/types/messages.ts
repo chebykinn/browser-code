@@ -214,6 +214,23 @@ export interface CleanupVfsPathsMessage {
   type: 'CLEANUP_VFS_PATHS';
 }
 
+// Tool approval messages (background → sidebar)
+export interface ToolApprovalRequestMessage {
+  type: 'TOOL_APPROVAL_REQUEST';
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  riskLevel: import('./tools').ToolRiskLevel;
+}
+
+// Tool approval messages (sidebar → background)
+export interface ToolApprovalResponseMessage {
+  type: 'TOOL_APPROVAL_RESPONSE';
+  toolCallId: string;
+  approved: boolean;
+  tabId: number;
+}
+
 // Plan mode messages (sidebar to background)
 export interface SetModeMessage {
   type: 'SET_MODE';
@@ -284,7 +301,8 @@ export type SidebarToBackgroundMessage =
   | ApprovePlanMessage
   | RejectPlanMessage
   | ToggleVfsFileEnabledMessage
-  | SetAllVfsFilesEnabledMessage;
+  | SetAllVfsFilesEnabledMessage
+  | ToolApprovalResponseMessage;
 
 export interface GetVfsFilesContentMessage {
   type: 'GET_VFS_FILES';
@@ -331,7 +349,8 @@ export type BackgroundToSidebarMessage =
   | AgentErrorMessage
   | ModeChangedMessage
   | TodosUpdatedMessage
-  | VfsStorageChangedMessage;
+  | VfsStorageChangedMessage
+  | ToolApprovalRequestMessage;
 
 // Settings
 export interface Settings {
